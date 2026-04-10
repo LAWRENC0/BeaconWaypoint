@@ -1,4 +1,4 @@
-# Beacon Finder ‚Äî Local Test Product (LTP) Specification
+# Beacon Finder - Local Test Product (LTP) Specification
 **Version:** 1.0-LTP (Pure Client)
 **Status:** Ready for Local Prototyping
 **Architecture:** 100% Client-Side (No Backend)
@@ -36,22 +36,22 @@ Everything happens within the Browser (Chrome on Android):
 ## 4. Technical Specifications
 
 ### 4.1 Sensor Sampling
-To avoid "jitter," sensors are **not** tracked live. 
+To avoid "jitter," sensors are **not** tracked live.
 - The system listens to the `deviceorientationabsolute` stream.
-- When "Capture" is pressed, the *last known* Heading ($ lpha$) and Pitch ($ eta$) are frozen into a local variable.
+- When "Capture" is pressed, the *last known* Heading ($\alpha$) and Pitch ($\beta$) are frozen into a local variable.
 
 ### 4.2 Pixel Mapping Logic (The Geometry Engine)
 The following constants are hardcoded for the test device:
 - **H-FOV:** $70^\circ$
-- **V-FOV:** Calculated via `(Window.innerHeight / Window.innerWidth) * 70`
-- **$PPD_H$:** `Window.innerWidth / 70`
+- **V-FOV:** Calculated via `(window.innerHeight / window.innerWidth) * 70`
+- **$PPD_H$:** `window.innerWidth / 70`
 
 **Transformation Math:**
 1.  **Distance ($d$):** Haversine formula (JS implementation).
-2.  **Bearing ($	heta$):** Forward azimuth formula.
-3.  **Elevation ($\phi$):** $ rctan((h_t - h_u) / d)$.
-4.  **$X_{pos} = (Width / 2) + ((	heta -  lpha) 	imes PPD_H)$**
-5.  **$Y_{pos} = (Height / 2) - (\phi 	imes PPD_V)$**
+2.  **Bearing ($\theta$):** Forward azimuth formula.
+3.  **Elevation ($\phi$):** $\arctan((h_t - h_u) / d)$.
+4.  **$X_{pos} = (Width / 2) + ((\theta - \alpha) \times PPD_H)$**
+5.  **$Y_{pos} = (Height / 2) - (\phi \times PPD_V)$**
 
 ---
 
