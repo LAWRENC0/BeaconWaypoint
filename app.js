@@ -2,110 +2,216 @@ import { project } from "./geo.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
-  photo: $("photo"), place: $("place"), search: $("search"),
-  locate: $("locate"), compass: $("compass"), useHeading: $("useHeading"),
+  photo: $("photo"), place: $("place"), search: $("search"), candidates: $("candidates"),
+  hintTarget: $("hint-target"), locate: $("locate"), hintUser: $("hint-user"),
+  compass: $("compass"), useHeading: $("useHeading"), hintAim: $("hint-aim"),
   heading: $("heading"), pitch: $("pitch"), fov: $("fov"), height: $("height"),
-  status: $("status"), message: $("message"), canvas: $("result"),
+  stage: $("stage"), canvas: $("result"), message: $("message"),
+  back: $("back"), next: $("next"),
+  stepItems: [...document.querySelectorAll("#stepper li")],
+  stepCards: [...document.querySelectorAll(".step")],
 };
+
+const STEP_PHOTO = 0, STEP_TARGET = 1, STEP_USER = 2, STEP_AIM = 3, STEP_RESULT = 4;
+const LAST_STEP = STEP_RESULT;
 
 const state = {
-  image: null,      // HTMLImageElement of the chosen photo
-  user: null,       // { lat, lon, accuracy }
-  target: null,     // { lat, lon, name }
-  liveHeading: null // latest compass reading, degrees
+  step: STEP_PHOTO,
+  image: null,       // HTMLImageElement
+  candidates: [],    // search results
+  target: null,      // chosen { lat, lon, name }
+  user: null,        // { lat, lon, accuracy }
+  liveHeading: null, // latest compass reading
+  compassOn: false,
 };
 
-const setStatus = (text) => { els.status.textContent = text; };
+// ---------- navigation ----------
 
-// Keep the slider readouts in sync.
-for (const [input, out] of [[els.heading, "headingOut"], [els.pitch, "pitchOut"], [els.fov, "fovOut"], [els.height, "heightOut"]]) {
-  input.addEventListener("input", () => { $(out).textContent = input.value; render(); });
+function canAdvance() {
+  switch (state.step) {
+    case STEP_PHOTO: return !!state.image;
+    case STEP_TARGET: return !!state.target;
+    case STEP_USER: return !!state.user;
+    case STEP_AIM: return true;
+    default: return false;
+  }
 }
 
-// 1. Photo
+function goTo(step) {
+  state.step = Math.max(0, Math.min(LAST_STEP, step));
+  renderSteps();
+}
+
+function renderSteps() {
+  const s = state.step;
+  els.stepCards.forEach((card) => card.classList.toggle("on", Number(card.dataset.step) === s));
+  els.stepItems.forEach((li, i) => {
+    li.classList.toggle("current", i === s);
+    li.classList.toggle("done", i < s);
+  });
+  els.back.disabled = s === STEP_PHOTO;
+  els.next.disabled = !canAdvance();
+  els.next.textContent =
+    s === STEP_AIM ? "See result" :
+    s === STEP_RESULT ? "Start over" : "Next";
+  els.stage.classList.toggle("on", s >= STEP_AIM && !!state.image);
+  if (s === STEP_RESULT) els.stage.classList.add("on");
+  drawPreview();
+}
+
+els.back.addEventListener("click", () => goTo(state.step - 1));
+els.next.addEventListener("click", () => {
+  if (state.step === STEP_RESULT) return reset();
+  goTo(state.step + 1);
+});
+
+function reset() {
+  state.image = null; state.candidates = []; state.target = null; state.user = null;
+  els.photo.value = ""; els.place.value = ""; els.candidates.innerHTML = "";
+  els.hintTarget.textContent = ""; els.hintUser.textContent = "";
+  goTo(STEP_PHOTO);
+}
+
+// ---------- slider readouts ----------
+
+for (const [input, out] of [[els.heading, "headingOut"], [els.pitch, "pitchOut"], [els.fov, "fovOut"], [els.height, "heightOut"]]) {
+  input.addEventListener("input", () => { $(out).textContent = input.value; drawPreview(); });
+}
+
+// ---------- step 1: photo ----------
+
 els.photo.addEventListener("change", () => {
   const file = els.photo.files[0];
   if (!file) return;
   const img = new Image();
-  img.onload = () => { state.image = img; setStatus(`Photo loaded (${img.naturalWidth}×${img.naturalHeight}).`); render(); URL.revokeObjectURL(img.src); };
+  img.onload = () => {
+    URL.revokeObjectURL(img.src);
+    state.image = img;
+    renderSteps();
+  };
   img.src = URL.createObjectURL(file);
 });
 
-// 2. Target search via Nominatim (OpenStreetMap)
-els.search.addEventListener("click", async () => {
+// ---------- step 2: target search (several candidates) ----------
+
+els.search.addEventListener("click", searchPlace);
+els.place.addEventListener("keydown", (e) => { if (e.key === "Enter") searchPlace(); });
+
+async function searchPlace() {
   const q = els.place.value.trim();
-  if (!q) return setStatus("Type a place or address first.");
-  setStatus("Searching…");
+  if (!q) { els.hintTarget.textContent = "Type a name or address first."; return; }
+  els.hintTarget.textContent = "Searching…";
+  els.candidates.innerHTML = "";
   try {
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=6&q=${encodeURIComponent(q)}`;
     const res = await fetch(url, { headers: { "Accept-Language": navigator.language || "en" } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const hits = await res.json();
-    if (!hits.length) { state.target = null; setStatus("No place found."); return render(); }
-    const hit = hits[0];
-    state.target = { lat: parseFloat(hit.lat), lon: parseFloat(hit.lon), name: hit.display_name };
-    setStatus(`Target: ${state.target.name}\n(${state.target.lat.toFixed(5)}, ${state.target.lon.toFixed(5)})`);
-    render();
+    state.candidates = (await res.json()).map((h) => ({
+      lat: parseFloat(h.lat), lon: parseFloat(h.lon), name: h.display_name, kind: h.type || h.class || "",
+    }));
+    if (!state.candidates.length) {
+      els.hintTarget.textContent = "No matches. Try a more complete address or add the city.";
+      return;
+    }
+    els.hintTarget.textContent = `${state.candidates.length} possible matches. Pick the right one.`;
+    renderCandidates();
   } catch (err) {
-    setStatus(`Search failed: ${err.message}`);
+    els.hintTarget.textContent = `Search failed: ${err.message}`;
   }
-});
+}
 
-// 3a. GPS
+function renderCandidates() {
+  els.candidates.innerHTML = "";
+  state.candidates.forEach((c) => {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.setAttribute("aria-pressed", String(state.target && state.target.name === c.name));
+    const title = document.createElement("span");
+    title.textContent = c.name;
+    btn.appendChild(title);
+    if (c.kind) {
+      const small = document.createElement("small");
+      small.textContent = c.kind;
+      btn.appendChild(small);
+    }
+    btn.addEventListener("click", () => {
+      state.target = c;
+      els.hintTarget.textContent = `Target set: ${c.name}`;
+      renderCandidates();
+      renderSteps();
+    });
+    li.appendChild(btn);
+    els.candidates.appendChild(li);
+  });
+}
+
+// ---------- step 3: GPS ----------
+
 els.locate.addEventListener("click", () => {
-  if (!navigator.geolocation) return setStatus("Geolocation not supported.");
-  setStatus("Getting GPS fix…");
+  if (!navigator.geolocation) { els.hintUser.textContent = "This browser has no location support."; return; }
+  els.hintUser.textContent = "Getting your position…";
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       state.user = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy };
-      setStatus(`You: (${state.user.lat.toFixed(5)}, ${state.user.lon.toFixed(5)}) ±${Math.round(state.user.accuracy)} m`);
-      render();
+      els.hintUser.textContent = `Position found (±${Math.round(state.user.accuracy)} m accuracy).`;
+      renderSteps();
     },
-    (err) => setStatus(`GPS error: ${err.message}`),
+    (err) => { els.hintUser.textContent = `Could not get position: ${err.message}`; },
     { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
   );
 });
 
-// 3b. Compass (heading). iOS needs an explicit permission request from a user gesture.
+// ---------- step 4: compass ----------
+
 els.compass.addEventListener("click", async () => {
   try {
     if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
       const p = await DeviceOrientationEvent.requestPermission();
-      if (p !== "granted") return setStatus("Orientation permission denied.");
+      if (p !== "granted") { setAimHint("Compass permission denied. Set the heading by hand."); return; }
     }
-    const handler = (e) => {
-      if (typeof e.webkitCompassHeading === "number") state.liveHeading = e.webkitCompassHeading; // iOS
-      else if (e.absolute && typeof e.alpha === "number") state.liveHeading = (360 - e.alpha) % 360; // Android
-      else return;
-    };
-    window.addEventListener("deviceorientationabsolute", handler);
-    window.addEventListener("deviceorientation", handler);
-    setStatus("Compass on. Press \"Use current heading\" to copy the live value.");
+    if (!state.compassOn) {
+      const handler = (e) => {
+        if (typeof e.webkitCompassHeading === "number") state.liveHeading = e.webkitCompassHeading; // iOS
+        else if (e.absolute && typeof e.alpha === "number") state.liveHeading = (360 - e.alpha) % 360; // Android
+      };
+      window.addEventListener("deviceorientationabsolute", handler);
+      window.addEventListener("deviceorientation", handler);
+      state.compassOn = true;
+    }
+    setAimHint("Compass on. Press \"Use live compass\" to copy the reading.");
   } catch (err) {
-    setStatus(`Compass error: ${err.message}`);
+    setAimHint(`Compass error: ${err.message}`);
   }
 });
 
 els.useHeading.addEventListener("click", () => {
-  if (state.liveHeading == null) return setStatus("No compass reading yet.");
+  if (state.liveHeading == null) { setAimHint("No compass reading yet. Enable the compass first."); return; }
   els.heading.value = Math.round(state.liveHeading);
   $("headingOut").textContent = els.heading.value;
-  render();
+  setAimHint("");
+  drawPreview();
 });
 
-// Draw the photo and, if everything is known, the beacon.
-function render() {
-  const c = els.canvas;
-  const ctx = c.getContext("2d");
-  if (!state.image) {
-    c.width = 0; c.height = 0; els.message.textContent = ""; return;
-  }
+function setAimHint(text) {
+  els.hintAim.textContent = text;
+}
+
+// ---------- preview / beacon ----------
+
+function drawPreview() {
+  const ctx = els.canvas.getContext("2d");
+  if (!state.image) { els.canvas.width = 0; els.canvas.height = 0; return; }
   const W = state.image.naturalWidth, H = state.image.naturalHeight;
-  c.width = W; c.height = H;
+  els.canvas.width = W; els.canvas.height = H;
   ctx.drawImage(state.image, 0, 0, W, H);
 
+  if (state.step < STEP_AIM) return;
+
   if (!state.target || !state.user) {
-    els.message.textContent = !state.target ? "Search a target." : "Get your GPS position.";
+    els.message.textContent = !state.target
+      ? "No target chosen yet. Go back to step 2."
+      : "No position yet. Go back to step 3.";
     return;
   }
 
@@ -124,22 +230,21 @@ function render() {
 
   if (p.inFrame) {
     els.message.textContent = `Target in frame · ${distTxt}`;
-    drawBeacon(ctx, p.x, p.y, distTxt);
+    drawBeacon(ctx, p.x, p.y, `${state.target.name.split(",")[0]} · ${distTxt}`, false);
   } else {
     const hint = [];
-    if (p.dTheta < 0) hint.push(`${Math.abs(p.dTheta).toFixed(0)}° to the left`);
-    if (p.dTheta > 0) hint.push(`${p.dTheta.toFixed(0)}° to the right`);
-    if (p.dPhi > 0) hint.push(`${p.dPhi.toFixed(0)}° above`);
-    if (p.dPhi < 0) hint.push(`${Math.abs(p.dPhi).toFixed(0)}° below`);
-    els.message.textContent = `Target out of frame: ${hint.join(", ")} · ${distTxt}`;
-    // Show the clamped position so you can see roughly where it is.
+    if (p.dTheta < -1) hint.push(`turn ${Math.abs(p.dTheta).toFixed(0)}° left`);
+    if (p.dTheta > 1) hint.push(`turn ${p.dTheta.toFixed(0)}° right`);
+    if (p.dPhi > 1) hint.push(`tilt ${p.dPhi.toFixed(0)}° up`);
+    if (p.dPhi < -1) hint.push(`tilt ${Math.abs(p.dPhi).toFixed(0)}° down`);
+    els.message.textContent = `Target out of frame: ${hint.join(", ") || "adjust sliders"} · ${distTxt}`;
     const cx = Math.min(Math.max(p.x, 0), W), cy = Math.min(Math.max(p.y, 0), H);
-    drawBeacon(ctx, cx, cy, distTxt, true);
+    drawBeacon(ctx, cx, cy, `${state.target.name.split(",")[0]} · ${distTxt}`, true);
   }
 }
 
-function drawBeacon(ctx, x, y, label, dimmed = false) {
-  const r = Math.max(10, state.image.naturalWidth / 100); // scale with image size
+function drawBeacon(ctx, x, y, label, dimmed) {
+  const r = Math.max(10, state.image.naturalWidth / 100);
   ctx.save();
   ctx.globalAlpha = dimmed ? 0.6 : 1;
   ctx.beginPath();
@@ -161,4 +266,4 @@ function drawBeacon(ctx, x, y, label, dimmed = false) {
   ctx.restore();
 }
 
-render();
+renderSteps();

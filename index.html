@@ -5,56 +5,164 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Beacon Finder</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 900px; margin-inline: auto; }
-    h1 { font-size: 1.4rem; margin: 0 0 12px; }
-    fieldset { border: 1px solid #8884; border-radius: 8px; margin: 0 0 12px; padding: 10px 12px; }
-    legend { font-weight: 600; padding: 0 4px; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
-    input[type=text] { flex: 1 1 220px; padding: 8px; font-size: 1rem; }
-    button { padding: 8px 12px; font-size: 0.95rem; cursor: pointer; }
-    label.slider { display: grid; grid-template-columns: 110px 1fr 56px; gap: 8px; align-items: center; margin: 4px 0; }
-    label.slider input { width: 100%; }
-    #status { font-size: 0.9rem; color: #777; min-height: 1.2em; margin: 6px 0; white-space: pre-line; }
-    #result { max-width: 100%; height: auto; display: block; border-radius: 8px; background: #0002; }
-    #message { font-weight: 600; margin: 8px 0; }
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f6f8; --card: #ffffff; --ink: #1d2330; --muted: #6b7280;
+      --accent: #2563eb; --accent-ink: #ffffff; --line: #d9dde5; --ok: #15803d; --beacon: #ff0000;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #0f1218; --card: #1a1f2a; --ink: #e8ebf1; --muted: #9aa3b2;
+        --accent: #3b82f6; --line: #2c3442; --ok: #22c55e;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #0f1218; --card: #1a1f2a; --ink: #e8ebf1; --muted: #9aa3b2;
+      --accent: #3b82f6; --line: #2c3442; --ok: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, -apple-system, sans-serif; }
+    main { max-width: 760px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+    .tagline { color: var(--muted); margin: 0 0 16px; }
+
+    /* stepper */
+    #stepper { list-style: none; display: flex; gap: 6px; padding: 0; margin: 0 0 16px; counter-reset: s; }
+    #stepper li { flex: 1; text-align: center; font-size: 0.75rem; color: var(--muted); padding-top: 8px; border-top: 3px solid var(--line); }
+    #stepper li.done { border-color: var(--ok); color: var(--ok); }
+    #stepper li.current { border-color: var(--accent); color: var(--ink); font-weight: 600; }
+
+    /* cards */
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-bottom: 14px; }
+    .card h2 { font-size: 1.15rem; margin: 0 0 6px; }
+    .card .lead { color: var(--muted); margin: 0 0 14px; }
+    .hint { font-size: 0.9rem; color: var(--muted); margin-top: 10px; min-height: 1.3em; white-space: pre-line; }
+
+    /* inputs */
+    input[type=text] { width: 100%; padding: 12px; font-size: 1rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn { appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 11px 16px; border-radius: 10px; font-size: 0.95rem; cursor: pointer; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .btn:disabled { opacity: 0.45; cursor: default; }
+    .file { display: block; width: 100%; }
+
+    /* candidate list */
+    #candidates { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; }
+    #candidates button { width: 100%; text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); cursor: pointer; font: inherit; }
+    #candidates button[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+    #candidates small { color: var(--muted); display: block; }
+
+    /* sliders */
+    .slider { margin: 16px 0 4px; }
+    .slider .head { display: flex; justify-content: space-between; font-weight: 600; }
+    .slider output { font-variant-numeric: tabular-nums; color: var(--accent); }
+    .slider input { width: 100%; accent-color: var(--accent); }
+    .slider p { margin: 4px 0 0; color: var(--muted); font-size: 0.9rem; }
+
+    /* preview */
+    #stage { display: none; }
+    #stage.on { display: block; }
+    #result { display: block; width: 100%; height: auto; border-radius: 12px; background: #0003; }
+    #message { font-weight: 600; margin: 10px 0 0; }
+
+    /* nav */
+    nav { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+    .step { display: none; }
+    .step.on { display: block; }
   </style>
 </head>
 <body>
+<main>
   <h1>Beacon Finder</h1>
+  <p class="tagline">Find a place you can't see, step by step.</p>
 
-  <fieldset>
-    <legend>1. Photo</legend>
+  <ol id="stepper">
+    <li>1 Photo</li>
+    <li>2 Target</li>
+    <li>3 Your spot</li>
+    <li>4 Aim</li>
+    <li>5 Result</li>
+  </ol>
+
+  <!-- Step 1 -->
+  <section class="card step" data-step="0">
+    <h2>Take or choose a photo</h2>
+    <p class="lead">Take a photo of the area where you are standing, facing the direction you want to search. The beacon will be drawn on this picture.</p>
+    <input id="photo" class="file" type="file" accept="image/*" capture="environment">
+  </section>
+
+  <!-- Step 2 -->
+  <section class="card step" data-step="1">
+    <h2>Name what you are looking for</h2>
+    <p class="lead">Type a name or address. Pick the match that is the right one. Searching for "Colosseum" or "Via Appia 10, Rome" both work.</p>
     <div class="row">
-      <input id="photo" type="file" accept="image/*" capture="environment">
+      <input id="place" type="text" placeholder="e.g. Colosseum, Rome" autocomplete="off">
     </div>
-  </fieldset>
+    <div class="row" style="margin-top:8px"><button id="search" class="btn primary">Search</button></div>
+    <ul id="candidates" aria-label="Search results"></ul>
+    <div id="hint-target" class="hint"></div>
+  </section>
 
-  <fieldset>
-    <legend>2. Target</legend>
-    <div class="row">
-      <input id="place" type="text" placeholder="e.g. Colosseum, Rome">
-      <button id="search">Search</button>
+  <!-- Step 3 -->
+  <section class="card step" data-step="2">
+    <h2>Where are you standing?</h2>
+    <p class="lead">Your GPS position is needed to work out the direction and distance to the target. Stand where you took the photo.</p>
+    <div class="row"><button id="locate" class="btn primary">Get my position</button></div>
+    <div id="hint-user" class="hint"></div>
+  </section>
+
+  <!-- Step 4 -->
+  <section class="card step" data-step="3">
+    <h2>Aim the photo</h2>
+    <p class="lead">Tell the app how the camera was pointing when you took the photo. Move the sliders until the beacon sits where the target really is. The preview updates as you move them.</p>
+
+    <div class="slider">
+      <div class="head">Heading <output id="headingOut">0</output>°</div>
+      <input id="heading" type="range" min="0" max="360" step="1" value="0">
+      <p>The compass direction the camera faced. 0° = north, 90° = east, 180° = south, 270° = west. If you have a compass on this phone, press "Use live compass" to copy it.</p>
     </div>
-  </fieldset>
-
-  <fieldset>
-    <legend>3. Your position & direction</legend>
-    <div class="row">
-      <button id="locate">Get my GPS position</button>
-      <button id="compass">Enable compass</button>
-      <button id="useHeading">Use current heading</button>
+    <div class="row" style="margin-top:8px">
+      <button id="compass" class="btn">Enable compass</button>
+      <button id="useHeading" class="btn">Use live compass</button>
     </div>
-    <label class="slider">Heading (°) <input id="heading" type="range" min="0" max="360" step="1" value="0"><output id="headingOut">0</output></label>
-    <label class="slider">Pitch (°) <input id="pitch" type="range" min="-90" max="90" step="1" value="0"><output id="pitchOut">0</output></label>
-    <label class="slider">H-FOV (°) <input id="fov" type="range" min="30" max="110" step="1" value="70"><output id="fovOut">70</output></label>
-    <label class="slider">Target height (m) <input id="height" type="range" min="-50" max="500" step="1" value="0"><output id="heightOut">0</output></label>
-  </fieldset>
+    <div id="hint-aim" class="hint"></div>
 
-  <div id="status"></div>
-  <div id="message"></div>
-  <canvas id="result"></canvas>
+    <div class="slider">
+      <div class="head">Pitch <output id="pitchOut">0</output>°</div>
+      <input id="pitch" type="range" min="-90" max="90" step="1" value="0">
+      <p>How far the camera was tilted up or down. 0° = held level, positive = pointing up (for tall buildings), negative = pointing down.</p>
+    </div>
 
-  <script type="module" src="app.js"></script>
+    <div class="slider">
+      <div class="head">Field of view <output id="fovOut">70</output>°</div>
+      <input id="fov" type="range" min="30" max="110" step="1" value="70">
+      <p>How wide the lens sees. About 70° is a typical phone camera. Bigger means wider view. If you know your phone's value, use it.</p>
+    </div>
+
+    <div class="slider">
+      <div class="head">Target height <output id="heightOut">0</output> m</div>
+      <input id="height" type="range" min="-50" max="500" step="1" value="0">
+      <p>How much higher the target is than your eyes, in metres. Leave it at 0 if you don't know. It only changes how high the beacon sits.</p>
+    </div>
+  </section>
+
+  <!-- Step 5 -->
+  <section class="card step" data-step="4">
+    <h2>Your beacon</h2>
+    <p class="lead">The red dot marks where the target is in your photo. If it is outside the frame, the message tells you which way to turn.</p>
+  </section>
+
+  <div id="stage" class="card">
+    <canvas id="result"></canvas>
+    <div id="message"></div>
+  </div>
+
+  <nav>
+    <button id="back" class="btn">Back</button>
+    <button id="next" class="btn primary">Next</button>
+  </nav>
+</main>
+
+<script type="module" src="app.js"></script>
 </body>
 </html>
