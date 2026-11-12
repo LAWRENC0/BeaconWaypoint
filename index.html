@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beacon Finder</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 900px; margin-inline: auto; }
+    h1 { font-size: 1.4rem; margin: 0 0 12px; }
+    fieldset { border: 1px solid #8884; border-radius: 8px; margin: 0 0 12px; padding: 10px 12px; }
+    legend { font-weight: 600; padding: 0 4px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+    input[type=text] { flex: 1 1 220px; padding: 8px; font-size: 1rem; }
+    button { padding: 8px 12px; font-size: 0.95rem; cursor: pointer; }
+    label.slider { display: grid; grid-template-columns: 110px 1fr 56px; gap: 8px; align-items: center; margin: 4px 0; }
+    label.slider input { width: 100%; }
+    #status { font-size: 0.9rem; color: #777; min-height: 1.2em; margin: 6px 0; white-space: pre-line; }
+    #result { max-width: 100%; height: auto; display: block; border-radius: 8px; background: #0002; }
+    #message { font-weight: 600; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>Beacon Finder</h1>
+
+  <fieldset>
+    <legend>1. Photo</legend>
+    <div class="row">
+      <input id="photo" type="file" accept="image/*" capture="environment">
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. Target</legend>
+    <div class="row">
+      <input id="place" type="text" placeholder="e.g. Colosseum, Rome">
+      <button id="search">Search</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>3. Your position & direction</legend>
+    <div class="row">
+      <button id="locate">Get my GPS position</button>
+      <button id="compass">Enable compass</button>
+      <button id="useHeading">Use current heading</button>
+    </div>
+    <label class="slider">Heading (°) <input id="heading" type="range" min="0" max="360" step="1" value="0"><output id="headingOut">0</output></label>
+    <label class="slider">Pitch (°) <input id="pitch" type="range" min="-90" max="90" step="1" value="0"><output id="pitchOut">0</output></label>
+    <label class="slider">H-FOV (°) <input id="fov" type="range" min="30" max="110" step="1" value="70"><output id="fovOut">70</output></label>
+    <label class="slider">Target height (m) <input id="height" type="range" min="-50" max="500" step="1" value="0"><output id="heightOut">0</output></label>
+  </fieldset>
+
+  <div id="status"></div>
+  <div id="message"></div>
+  <canvas id="result"></canvas>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
