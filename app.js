@@ -11,7 +11,7 @@ const els = {
   cam: $("cam"), canvas: $("live"), liveMsg: $("liveMsg"),
   calibrate: $("calibrate"), calHint: $("cal-hint"), calInfo: $("cal-info"), resetCal: $("reset-cal"),
   fov: $("fov"), fovOut: $("fovOut"), height: $("height"), heightOut: $("heightOut"),
-  back: $("back"), next: $("next"),
+  back: $("back"), next: $("next"), progressFill: $("progress-fill"),
 };
 
 const STEP_TARGET = 0, STEP_ACCESS = 1, STEP_LIVE = 2;
@@ -20,6 +20,9 @@ const SENSOR_TIMEOUT_MS = 1000; // no sensor event for this long = compass consi
 const CAL_MAX_CORRECTION = 30;  // larger corrections are rejected as a likely wrong tap
 const MAX_DISTANCE_M = 70000;   // flat-plane model is only valid to ~70 km (LTP/MVP spec gate)
 
+// Bump when the meaning of saved offsets changes. Version 1 offsets were calibrated
+// without declination and are discarded on load.
+const PROFILE_VERSION = 2;
 const DEFAULT_PROFILE = { version: PROFILE_VERSION, headingOffset: 0, pitchOffset: 0, fovH: 70, calLat: null, calLon: null };
 
 const state = {
@@ -39,10 +42,6 @@ const state = {
   heightDiffM: 0,
   declDeg: 0,          // magnetic declination at the user's position (east positive)
 };
-
-// Bump when the meaning of saved offsets changes. Version 1 offsets were calibrated
-// without declination and are discarded on load.
-const PROFILE_VERSION = 2;
 
 // ---------- device profile (saved calibration) ----------
 
@@ -119,6 +118,7 @@ function renderSteps() {
     li.classList.toggle("current", i === s);
     li.classList.toggle("done", i < s);
   });
+  els.progressFill.style.width = `${(s / (STEP_LIVE)) * 100}%`;
   els.back.disabled = s === STEP_TARGET;
   els.next.style.display = s === STEP_LIVE ? "none" : "";
   els.next.disabled = !canAdvance();
@@ -158,16 +158,19 @@ async function searchPlace() {
       return;
     }
     els.hintTarget.textContent = `${state.candidates.length} possible matches. Pick the right one.`;
-    renderCandidates();
+    renderCandidates(true);
   } catch (err) {
     els.hintTarget.textContent = `Search failed: ${err.message}`;
   }
 }
 
-function renderCandidates() {
+function renderCandidates(fresh = false) {
   els.candidates.innerHTML = "";
-  state.candidates.forEach((c) => {
+  state.candidates.forEach((c, i) => {
     const li = document.createElement("li");
+    // Only new search results animate in; re-rendering after a pick stays still.
+    if (fresh) li.style.animationDelay = `${i * 60}ms`;
+    else li.style.animation = "none";
     const btn = document.createElement("button");
     btn.type = "button";
     btn.setAttribute("aria-pressed", String(!!state.target && state.target.name === c.name));
