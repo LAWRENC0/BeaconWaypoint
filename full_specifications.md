@@ -36,47 +36,29 @@ The system operates exclusively on **Live Mode**: User captures directly in-brow
 
 ## 2. User Flow
 
-The following numbered flow defines the canonical user journey and serves as the integration contract between all system components.
+The following numbered flow defines the canonical user journey and serves as the integration contract between all system components. The current implementation is a three-step page: target, access, live.
 
-1. **User opens the app.**
-2. **User types a target name (e.g. "Colosseum, Rome").**
+1. **User opens the app (landscape).**
+2. **User types a target name (e.g. "Colosseum, Rome") and picks a match.**
       → §4: Geocoding API resolves name → (lat_t, lon_t)
-      → §4: Elevation API resolves → h_t (meters ASL)
-      → If ambiguous results: disambiguation UI presented.
+      → If ambiguous results: disambiguation list shown.
       → If resolution fails: error surfaced, user prompted to retry.
 
-3. **User prepares for capture.**
-      → MediaDevices API opens live camera feed.
-      → System begins real-time tracking of heading, pitch, and roll.
-      → Directional UI cues (§7) guide user toward the target bearing.
+3. **User grants camera, location and motion access.**
+      → MediaDevices API opens the camera feed.
+      → Geolocation API watches the user position continuously.
+      → DeviceOrientation API streams heading and pitch.
 
-4. **User triggers capture (Shutter).**
-      → MediaDevices API snapshots current frame.
-      → DeviceOrientation API samples heading + pitch + roll at the exact shutter millisecond.
-      → Geolocation API samples (lat_u, lon_u, h_u).
+4. **Live overlay runs every frame.**
+      → Video frame is drawn to a canvas.
+      → Heading, pitch and saved calibration give the current aim (§5).
+      → Geospatial computation (§6) and visibility gates (§7) run on the latest sample.
+      → Red dot + label is drawn on screen; off-screen targets are pinned to the edge with turn/tilt hints.
 
-5. **System extracts / validates metadata.**
-      → Magnetic declination correction applied to heading → True Heading.
-      → Validate sensors: if orientation API fails or is uncalibrated, trigger Manual Mode (§5).
+5. **User calibrates on a visible target (optional).**
+      → User taps the target building on the live frame; the heading and pitch correction is saved per device (§5.3).
 
-6. **Geospatial computation runs (§6).**
-      → Vincenty bearing + distance.
-      → Corrected elevation angle (curvature + refraction).
-
-7. **Visibility gates evaluated (§7).**
-      → Horizontal, Vertical, Distance gates.
-      → If any gate fails → directional UI feedback remains on the static result.
-
-8. **Pixel mapping computed (§8).**
-      → Roll-compensated (X', Y') coordinates.
-      → Edge-proximity check on final coordinates.
-
-9. **Waypoint rendered on image.**
-      → Red dot + label (name, distance km, elevation m ASL).
-      → Confidence warnings displayed if applicable.
-      → User may adjust heading/pitch sliders in real time → live recompute from §6.
-
-10. **User exports result as PNG (optional).**
+Capture-to-photo (shutter, static result, PNG export) is not part of the current design.
 
 ---
 
@@ -149,6 +131,13 @@ If GPS altitude deviates by more than **50 m** from the DEM-derived terrain elev
 
 ## 5. Calibration Layer
 
+### 5.0 Current Implementation
+- Heading and pitch come from the smoothed orientation vector (`geo.js` `cameraVector`, `blendVector`).
+- Magnetic declination (WMM 2025, bundled) is added to the sensor heading at the user's position.
+- A saved per-device calibration (`headingOffset`, `pitchOffset`) is applied on top. It is set by tapping a visible target, is capped at ±30° per tap, and is stored with the location where it was taken. The app warns when used more than 50 km from that location.
+- Landscape only: the overlay pauses with a "rotate" message in portrait.
+- Targets beyond 70 km show a limit message instead of a dot (§7 gate 3 uses 70 km; see Open Issues).
+
 ### 5.1 Real-Time Override Controls
 Always visible in the UI after capture:
 | Control | Range | Default |
@@ -198,8 +187,9 @@ $$FOV_V = 2 \arctan\!\left(\frac{H}{W} \cdot \tan\frac{FOV_H}{2}\right)$$
    *Fail:* Overlay arrows (←/→). Label: *"Target is [X°] to your [left/right]."*
 2. **Gate 2 — Vertical:** $|\phi_{corr}| \leq \frac{FOV_V}{2}$
    *Fail:* Overlay arrows (↑/↓). Label: *"Target is [above/below] frame."*
-3. **Gate 3 — Distance:** $d \leq 150,000 \text{ m}$
-   *Fail:* *"Target beyond visibility limit."*
+3. **Gate 3 — Distance:** $d \leq 70,000 \text{ m}$
+   *Fail:* *"Target beyond the 70 km limit of this model."*
+   *Decision:* 70 km (chosen by the owner). The 150 km value from earlier drafts is not used.
 
 ---
 
@@ -238,12 +228,14 @@ $$Y' = \frac{H}{2} - ((\Delta\theta \cdot PPD_H)\sin\gamma + (\phi_{corr} \cdot 
 
 ## 11. Out of Scope (Post-MVP)
 - Multiple waypoints.
-- Real-time AR video overlay (dot currently renders only on captured image).
 - Photo Gallery uploads.
+- Photo export of the overlay.
 
 ---
 
 ## 12. Open Issues Summary
 - **I1:** Compass jitter/drift management in Live Mode.
 - **I2:** API Cost management for high-volume geocoding.
-- **I3:** Safari vs Chrome `DeviceOrientation` implementation differences.
+- **I3:** Safari vs Chrome `DeviceOrientation` implementation differences (iOS heading uses `360 − webkitCompassHeading`; unverified on device).
+- **I4:** Declination is applied with the bundled WMM 2025 model (`vendor/declination.js`). Assumes the browser's sensor heading is magnetic north; not yet verified per device. Calibration offsets are for phone bias only, and the app warns beyond 50 km.
+- **I5:** Roll is not compensated; the phone must be held level.

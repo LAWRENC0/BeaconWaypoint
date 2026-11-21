@@ -1,6 +1,7 @@
 // Pure geometry helpers: no DOM, no browser APIs. Safe to test in isolation.
 
 const R = 6371000; // mean Earth radius, metres
+const REFRACTION_K = 0.13; // standard atmospheric refraction coefficient
 const toRad = (d) => (d * Math.PI) / 180;
 const toDeg = (r) => (r * 180) / Math.PI;
 
@@ -34,6 +35,36 @@ export function fovVDeg(fovHDeg, width, height) {
   return toDeg(2 * Math.atan((height / width) * Math.tan(toRad(fovHDeg) / 2)));
 }
 
+// Direction the back camera is pointing, in an East/North/Up frame, from the W3C
+// DeviceOrientation Euler angles (alpha about Z, beta about X, gamma about Y).
+// The back camera looks along the device's -Z axis.
+export function cameraVector(alphaDeg, betaDeg, gammaDeg) {
+  const a = toRad(alphaDeg), b = toRad(betaDeg), g = toRad(gammaDeg);
+  return {
+    east: -Math.sin(g) * Math.cos(a) - Math.cos(g) * Math.sin(b) * Math.sin(a),
+    north: -Math.sin(g) * Math.sin(a) + Math.cos(g) * Math.sin(b) * Math.cos(a),
+    up: -Math.cos(g) * Math.cos(b),
+  };
+}
+
+// Compass heading (0 = north, clockwise) and pitch (0 = horizon, + = up) of a direction vector.
+export function vectorToAim(v) {
+  return {
+    heading: (toDeg(Math.atan2(v.east, v.north)) + 360) % 360,
+    pitch: toDeg(Math.atan2(v.up, Math.hypot(v.east, v.north))),
+  };
+}
+
+// Exponential smoothing of direction vectors (avoids heading wrap-around problems).
+export function blendVector(prev, next, k) {
+  if (!prev) return next;
+  const e = prev.east + k * (next.east - prev.east);
+  const n = prev.north + k * (next.north - prev.north);
+  const u = prev.up + k * (next.up - prev.up);
+  const len = Math.hypot(e, n, u) || 1;
+  return { east: e / len, north: n / len, up: u / len };
+}
+
 // Flat-plane projection of the target onto the photo.
 //   headingDeg : camera azimuth, true north = 0, clockwise positive
 //   pitchDeg   : camera tilt, 0 = horizon, positive = looking up
@@ -42,7 +73,9 @@ export function project({ user, target, heightDiffM, headingDeg, pitchDeg, fovHD
   const dist = distanceM(user.lat, user.lon, target.lat, target.lon);
   const bearing = bearingDeg(user.lat, user.lon, target.lat, target.lon);
   const dTheta = wrap180(bearing - headingDeg); // horizontal offset from image centre
-  const elev = toDeg(Math.atan2(heightDiffM, dist)); // angle above horizon to target
+  // Angle above horizon to target, minus Earth curvature and refraction (full spec §6.2.2, k = 0.13).
+  const curvatureDeg = toDeg((dist / (2 * R)) * (1 - REFRACTION_K));
+  const elev = toDeg(Math.atan2(heightDiffM, dist)) - curvatureDeg;
   const dPhi = elev - pitchDeg; // vertical offset from image centre
 
   const fovV = fovVDeg(fovHDeg, width, height);
