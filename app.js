@@ -14,6 +14,7 @@ const els = {
   stCam: $("st-cam"), stGps: $("st-gps"), stSensor: $("st-sensor"),
   cam: $("cam"), canvas: $("live"), liveMsg: $("liveMsg"),
   calibrate: $("calibrate"), calHint: $("cal-hint"), calInfo: $("cal-info"), resetCal: $("reset-cal"), undoCal: $("undo-cal"),
+  showLandmarks: $("show-landmarks"),
   fov: $("fov"), fovOut: $("fovOut"), height: $("height"), heightOut: $("heightOut"),
   back: $("back"), next: $("next"), progressFill: $("progress-fill"),
 };
@@ -47,6 +48,7 @@ const state = {
   sheetOpen: false,    // target picker shown over the live view
   sheetMode: "target", // "target" = choose what to find; "cal" = choose a landmark to calibrate on
   calibrating: false,  // waiting for a tap on the calibration landmark
+  showLandmarks: false,// draw every saved landmark, to check the calibration by eye
   calTarget: null,     // landmark being tapped during calibration
   calHeight: 0,        // landmark height above the user's eyes (m), entered in the sheet
   device: "unknown device",
@@ -440,6 +442,8 @@ function frame() {
   if (!state.vec) return setLiveMsg("Waiting for compass… (move the phone)");
   if (!currentAim().sensorOn) return setLiveMsg("Compass stopped sending data. Move the phone or restart sensors.");
 
+  if (state.showLandmarks) drawLandmarks(ctx, W, H);
+
   const p = projectTarget(W, H, target);
   const distTxt = p.dist >= 1000 ? `${(p.dist / 1000).toFixed(2)} km` : `${Math.round(p.dist)} m`;
   if (state.calibrating) {
@@ -463,6 +467,34 @@ function frame() {
     if (p.dPhi < -1) hint.push(`tilt ${Math.abs(p.dPhi).toFixed(0)}° down`);
     setLiveMsg(`${state.calibrating ? "Landmark" : "Target"} ${hint.join(", ") || "nearby"} · ${distTxt}`);
   }
+}
+
+// Each saved landmark drawn at its position under the current calibration. If the
+// calibration is consistent, every ring sits on its building as the phone is panned.
+function drawLandmarks(ctx, W, H) {
+  state.profile.landmarks.forEach((q, i) => {
+    const p = project({
+      user: state.user, target: { lat: q.tLat, lon: q.tLon }, heightDiffM: q.hDiff,
+      headingDeg: currentAim().heading, pitchDeg: currentAim().pitch,
+      fovHDeg: state.profile.fovH, width: W, height: H,
+    });
+    if (!p.inFrame) return;
+    const r = Math.max(10, W / 60);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.lineWidth = Math.max(2, r / 5);
+    ctx.strokeStyle = "#00e5ff";
+    ctx.stroke();
+    ctx.font = `bold ${Math.max(14, r)}px system-ui, sans-serif`;
+    ctx.lineWidth = Math.max(3, r / 4);
+    ctx.strokeStyle = "rgba(0,0,0,0.8)";
+    ctx.fillStyle = "#00e5ff";
+    const label = `${i + 1} ${q.name.split(",")[0]}`;
+    ctx.strokeText(label, p.x + r * 1.3, p.y + r * 0.4);
+    ctx.fillText(label, p.x + r * 1.3, p.y + r * 0.4);
+    ctx.restore();
+  });
 }
 
 let lastMsg = "";
@@ -566,6 +598,11 @@ els.canvas.addEventListener("click", (e) => {
   saveProfile();
   els.calHint.textContent = describeFit(fit);
   renderSteps();
+});
+
+els.showLandmarks.addEventListener("click", () => {
+  state.showLandmarks = !state.showLandmarks;
+  els.showLandmarks.textContent = state.showLandmarks ? "Hide landmarks" : "Show landmarks";
 });
 
 els.undoCal.addEventListener("click", () => {
