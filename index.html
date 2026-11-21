@@ -22,6 +22,8 @@
     h1 { font-size: 1.5rem; margin: 8px 0 4px; }
     .tagline { color: var(--muted); margin: 0 0 16px; }
 
+    #progress { height: 4px; background: var(--line); border-radius: 2px; margin: 0 0 8px; overflow: hidden; }
+    #progress-fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.3s ease; }
     #stepper { list-style: none; display: flex; gap: 6px; padding: 0; margin: 0 0 16px; }
     #stepper li { flex: 1; text-align: center; font-size: 0.8rem; color: var(--muted); padding-top: 8px; border-top: 3px solid var(--line); }
     #stepper li.done { border-color: var(--ok); color: var(--ok); }
@@ -46,6 +48,9 @@
     #candidates button { width: 100%; text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); cursor: pointer; font: inherit; }
     #candidates button[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
     #candidates small { color: var(--muted); display: block; }
+    #candidates li { animation: rise 0.35s ease both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { #candidates li, #progress-fill { animation: none; transition: none; } }
 
     #live { display: block; width: 100%; height: auto; border-radius: 12px; background: #000; touch-action: manipulation; }
     #live.calibrating { cursor: crosshair; outline: 3px solid var(--accent); }
@@ -68,6 +73,7 @@
   <h1>Beacon Finder</h1>
   <p class="tagline">Find a place you can't see, live through your camera.</p>
 
+  <div id="progress" aria-hidden="true"><span id="progress-fill"></span></div>
   <ol id="stepper">
     <li>1 Target</li>
     <li>2 Access</li>
