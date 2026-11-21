@@ -53,7 +53,7 @@ function loadProfile() {
     const saved = raw ? JSON.parse(raw) : null;
     state.profile = saved && saved.version === PROFILE_VERSION
       ? { ...DEFAULT_PROFILE, ...saved }
-      : { ...DEFAULT_PROFILE, fovH: saved?.fovH ?? DEFAULT_PROFILE.fovH };
+      : { ...DEFAULT_PROFILE, fovH: saved && saved.fovH ? saved.fovH : DEFAULT_PROFILE.fovH };
   } catch {
     state.profile = { ...DEFAULT_PROFILE };
   }
@@ -466,4 +466,5 @@ els.resetCal.addEventListener("click", () => {
   renderCalInfo();
   renderSteps();
   requestAnimationFrame(frame);
+  document.body.dataset.ready = "1"; // index.html shows a notice if this never happens
 })();

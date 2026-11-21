@@ -133,10 +133,21 @@
     <button id="next" class="btn primary">Next</button>
   </nav>
 
+  <section id="boot-error" class="card" hidden>
+    <h2>The app did not start</h2>
+    <p class="lead">Your browser may be running an old copy of this page. Fully close the browser, reopen this page, or clear this site's data and try again.</p>
+  </section>
+
   <!-- Hidden camera feed; drawn onto the canvas each frame. -->
   <video id="cam" playsinline muted autoplay style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none"></video>
 </main>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=4"></script>
+<script>
+  // If the app script never starts (syntax error, old cached copy), say so instead of showing a dead page.
+  setTimeout(function () {
+    if (!document.body.dataset.ready) document.getElementById("boot-error").hidden = false;
+  }, 4000);
+</script>
 </body>
 </html>
