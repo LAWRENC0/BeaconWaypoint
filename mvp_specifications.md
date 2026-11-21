@@ -1,3 +1,5 @@
+> **Superseded.** The photo-capture design in this document is no longer the target. The current direction is the live overlay described in [full_specifications.md](full_specifications.md).
+
 # Beacon Finder ‚Äî Simplified MVP Specification (Android/Chrome)
 **Version:** 3.2-Alpha
 **Status:** Finalized for Development
