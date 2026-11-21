@@ -10,6 +10,7 @@ const els = {
   place: $("place"), search: $("search"), candidates: $("candidates"), hintTarget: $("hint-target"),
   changeTarget: $("change-target"), sheetDone: $("sheet-done"), targetLine: $("target-line"),
   calHeight: $("cal-height"), fullscreen: $("fullscreen"),
+  camRow: $("cam-row"), camSelect: $("cam-select"),
   startAccess: $("start-access"), hintAccess: $("hint-access"), deviceLine: $("device-line"),
   stCam: $("st-cam"), stGps: $("st-gps"), stSensor: $("st-sensor"),
   cam: $("cam"), canvas: $("live"), liveMsg: $("liveMsg"),
@@ -41,6 +42,8 @@ const state = {
   target: null,        // { lat, lon, name }
   user: null,          // { lat, lon }
   stream: null,
+  cameraId: null,      // camera chosen by the user (deviceId), null = browser default back camera
+  cameraKey: null,     // deviceId of the camera actually in use
   cameraOk: false,
   gpsOk: false,
   vec: null,           // smoothed camera direction vector
@@ -59,7 +62,8 @@ const state = {
 
 // ---------- device profile (saved calibration) ----------
 
-function profileKey() { return `beacon:cal:${state.device}`; }
+function profileKeyFor(cameraKey) { return `beacon:cal:${state.device}:${cameraKey || "default"}`; }
+function profileKey() { return profileKeyFor(state.cameraKey); }
 
 function loadProfile() {
   let saved = null;
@@ -304,16 +308,7 @@ async function startAccess() {
 
   // Camera: needs HTTPS (or localhost). Requested from this click so mobile browsers accept it.
   try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error("camera API unavailable (open the page over HTTPS)");
-    }
-    if (!state.stream) {
-      state.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } }, audio: false,
-      });
-      els.cam.srcObject = state.stream;
-    }
-    await els.cam.play();
+    if (!state.stream) await openCamera(state.cameraId);
     state.cameraOk = true;
     els.stCam.textContent = "ready";
     els.stCam.className = "ok";
@@ -363,6 +358,66 @@ async function startAccess() {
   els.startAccess.disabled = false;
   renderSteps();
 }
+
+// ---------- camera choice ----------
+// The browser otherwise picks the back camera itself, often a wide or ultra-wide lens.
+// Each lens has a different field of view, so calibration is kept per camera.
+
+async function openCamera(deviceId) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("camera API unavailable (open the page over HTTPS)");
+  }
+  if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
+  const video = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } };
+  state.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+  els.cam.srcObject = state.stream;
+  await els.cam.play();
+  const id = state.stream.getVideoTracks()[0].getSettings().deviceId || null;
+  if (id !== state.cameraKey) useCameraProfile(id);
+  await listCameras();
+}
+
+async function listCameras() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+  if (cams.length < 2) { els.camRow.hidden = true; return; }
+  const active = state.cameraKey;
+  els.camSelect.innerHTML = "";
+  cams.forEach((d, i) => {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || `Camera ${i + 1}`;
+    o.selected = d.deviceId === active;
+    els.camSelect.appendChild(o);
+  });
+  els.camRow.hidden = false;
+}
+
+// Calibration is stored per camera. A calibration made before cameras were distinguished
+// is copied to the first camera used, since that is the most likely one.
+function useCameraProfile(id) {
+  state.cameraKey = id;
+  try {
+    if (id && localStorage.getItem(profileKeyFor(id)) === null && localStorage.getItem(profileKeyFor(null)) !== null) {
+      localStorage.setItem(profileKeyFor(id), localStorage.getItem(profileKeyFor(null)));
+    }
+  } catch { /* storage unavailable */ }
+  loadProfile();
+  renderCalInfo();
+}
+
+els.camSelect.addEventListener("change", async () => {
+  const id = els.camSelect.value;
+  state.cameraId = id;
+  try { localStorage.setItem("beacon:camera", id); } catch { /* storage unavailable */ }
+  try {
+    await openCamera(id);
+    els.calHint.textContent = "Camera changed. Calibration for this camera is loaded.";
+  } catch (err) {
+    els.stCam.textContent = `error: ${err.message}`;
+    els.stCam.className = "warn";
+  }
+});
 
 function onOrientation(e) {
   let alpha = null;
@@ -643,6 +698,14 @@ els.resetCal.addEventListener("click", () => {
 
 (async function init() {
   state.device = await detectDevice();
+  try {
+    state.cameraId = localStorage.getItem("beacon:camera") || null;
+    // Calibrations saved before cameras were distinguished move to the default key.
+    const legacy = localStorage.getItem(`beacon:cal:${state.device}`);
+    if (legacy !== null && localStorage.getItem(profileKeyFor(null)) === null) {
+      localStorage.setItem(profileKeyFor(null), legacy);
+    }
+  } catch { /* storage unavailable */ }
   loadProfile();
   renderCalInfo();
   renderSteps();

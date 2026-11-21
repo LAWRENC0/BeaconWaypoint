@@ -114,6 +114,11 @@
     <div class="status"><span>Camera</span><b id="st-cam">not started</b></div>
     <div class="status"><span>Location (GPS)</span><b id="st-gps">not started</b></div>
     <div class="status"><span>Compass / motion</span><b id="st-sensor">not started</b></div>
+    <div class="row" id="cam-row" hidden>
+      <label style="width:100%">Camera
+        <select id="cam-select" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit;margin-top:6px"></select>
+      </label>
+    </div>
     <div class="row"><button id="start-access" class="btn primary">Start camera and sensors</button></div>
     <div id="hint-access" class="hint"></div>
     <p class="lead" id="device-line" style="margin-top:12px"></p>
@@ -166,7 +171,7 @@
   <video id="cam" playsinline muted autoplay style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none"></video>
 </main>
 
-<script type="module" src="app.js?v=7"></script>
+<script type="module" src="app.js?v=8"></script>
 <script>
   // If the app script never starts (syntax error, old cached copy), say so instead of showing a dead page.
   setTimeout(function () {
