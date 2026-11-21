@@ -134,7 +134,8 @@ If GPS altitude deviates by more than **50 m** from the DEM-derived terrain elev
 ### 5.0 Current Implementation
 - Heading and pitch come from the smoothed orientation vector (`geo.js` `cameraVector`, `blendVector`).
 - Magnetic declination (WMM 2025, bundled) is added to the sensor heading at the user's position.
-- A saved per-device calibration (`headingOffset`, `pitchOffset`) is applied on top. It is set by tapping a visible target, is capped at ±30° per tap, and is stored with the location where it was taken. The app warns when used more than 50 km from that location.
+- Saved per-device calibration is a list of points (up to 12). Each point is made by tapping the visible target; it stores the sensor aim at that moment and the correction that would put the target under the tap. The correction for any view is an inverse-square blend of nearby points. Taps at different spots in the view correct different parts of the view. A tap that disagrees with the current estimate by more than 30° is rejected. The app warns when used more than 50 km from the last calibration location.
+- The target picker is a bottom sheet over the live view ("Change target"), so the target can be switched without leaving the camera. Full screen uses the Fullscreen API and is not available on iPhone Safari.
 - Landscape only: the overlay pauses with a "rotate" message in portrait.
 - Targets beyond 70 km show a limit message instead of a dot (§7 gate 3 uses 70 km; see Open Issues).
 

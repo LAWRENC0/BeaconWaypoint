@@ -65,6 +65,14 @@
 
     .step { display: none; }
     .step.on { display: block; }
+    /* Target picker shown as a bottom sheet over the live camera view. */
+    .card.sheet { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; max-height: 75vh; overflow-y: auto; z-index: 20; border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,0.35); animation: sheetIn 0.25s ease both; }
+    .card.sheet.on { display: block; }
+    @keyframes sheetIn { from { transform: translateY(100%); } to { transform: none; } }
+    .sheet-only { display: none; }
+    .sheet .sheet-only { display: flex; }
+    @media (prefers-reduced-motion: reduce) { .card.sheet { animation: none; } }
+    #target-line { margin: 0 0 8px; font-weight: 600; color: var(--ink); }
     nav { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
   </style>
 </head>
@@ -88,6 +96,7 @@
     <div class="row"><button id="search" class="btn primary">Search</button></div>
     <ul id="candidates" aria-label="Search results"></ul>
     <div id="hint-target" class="hint"></div>
+    <div class="row sheet-only"><button id="sheet-done" class="btn primary">Done</button></div>
   </section>
 
   <!-- Step 2: access -->
@@ -104,10 +113,13 @@
 
   <!-- Step 3: live -->
   <section class="card step" data-step="2">
+    <p id="target-line"></p>
     <canvas id="live" aria-label="Live camera view with beacon"></canvas>
     <div id="liveMsg"></div>
     <div class="row">
-      <button id="calibrate" class="btn primary">Calibrate on target</button>
+      <button id="change-target" class="btn">Change target</button>
+      <button id="fullscreen" class="btn">Full screen</button>
+      <button id="calibrate" class="btn primary">Add calibration point</button>
     </div>
     <div id="cal-hint" class="hint"></div>
 
@@ -142,7 +154,7 @@
   <video id="cam" playsinline muted autoplay style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none"></video>
 </main>
 
-<script type="module" src="app.js?v=4"></script>
+<script type="module" src="app.js?v=5"></script>
 <script>
   // If the app script never starts (syntax error, old cached copy), say so instead of showing a dead page.
   setTimeout(function () {

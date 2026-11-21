@@ -5,7 +5,10 @@ const $ = (id) => document.getElementById(id);
 const els = {
   stepItems: [...document.querySelectorAll("#stepper li")],
   cards: [...document.querySelectorAll(".step")],
+  targetCard: document.querySelector('.step[data-step="0"]'),
   place: $("place"), search: $("search"), candidates: $("candidates"), hintTarget: $("hint-target"),
+  changeTarget: $("change-target"), sheetDone: $("sheet-done"), targetLine: $("target-line"),
+  fullscreen: $("fullscreen"),
   startAccess: $("start-access"), hintAccess: $("hint-access"), deviceLine: $("device-line"),
   stCam: $("st-cam"), stGps: $("st-gps"), stSensor: $("st-sensor"),
   cam: $("cam"), canvas: $("live"), liveMsg: $("liveMsg"),
@@ -17,28 +20,34 @@ const els = {
 const STEP_TARGET = 0, STEP_ACCESS = 1, STEP_LIVE = 2;
 const SENSOR_SMOOTHING = 0.2;   // 0..1, lower = smoother but laggier
 const SENSOR_TIMEOUT_MS = 1000; // no sensor event for this long = compass considered inactive
-const CAL_MAX_CORRECTION = 30;  // larger corrections are rejected as a likely wrong tap
+const CAL_MAX_CORRECTION = 30;  // a new tap this far from the current estimate is rejected as a wrong tap
+const CAL_MAX_POINTS = 12;      // oldest points are dropped beyond this
 const MAX_DISTANCE_M = 70000;   // flat-plane model is only valid to ~70 km (LTP/MVP spec gate)
+const CAL_MAX_DISTANCE_M = 50000; // calibration is warned about when used farther than this from where it was made
 
-// Bump when the meaning of saved offsets changes. Version 1 offsets were calibrated
-// without declination and are discarded on load.
-const PROFILE_VERSION = 2;
-const DEFAULT_PROFILE = { version: PROFILE_VERSION, headingOffset: 0, pitchOffset: 0, fovH: 70, calLat: null, calLon: null };
+// Profile versions:
+//   1: offsets calibrated without declination (discarded)
+//   2: one global heading/pitch offset
+//   3: list of calibration points; v2 offsets are kept as a constant base when no points exist
+const PROFILE_VERSION = 3;
+function defaultProfile() {
+  return { version: PROFILE_VERSION, headingOffset: 0, pitchOffset: 0, points: [], fovH: 70, calLat: null, calLon: null };
+}
 
 const state = {
   step: STEP_TARGET,
   candidates: [],
   target: null,        // { lat, lon, name }
   user: null,          // { lat, lon }
-  gpsAccuracy: null,
   stream: null,
   cameraOk: false,
   gpsOk: false,
   vec: null,           // smoothed camera direction vector
   lastSensor: 0,
   calibrating: false,
+  sheetOpen: false,    // target picker shown over the live view
   device: "unknown device",
-  profile: { ...DEFAULT_PROFILE },
+  profile: defaultProfile(),
   heightDiffM: 0,
   declDeg: 0,          // magnetic declination at the user's position (east positive)
 };
@@ -48,14 +57,20 @@ const state = {
 function profileKey() { return `beacon:cal:${state.device}`; }
 
 function loadProfile() {
+  let saved = null;
   try {
     const raw = localStorage.getItem(profileKey());
-    const saved = raw ? JSON.parse(raw) : null;
-    state.profile = saved && saved.version === PROFILE_VERSION
-      ? { ...DEFAULT_PROFILE, ...saved }
-      : { ...DEFAULT_PROFILE, fovH: saved && saved.fovH ? saved.fovH : DEFAULT_PROFILE.fovH };
-  } catch {
-    state.profile = { ...DEFAULT_PROFILE };
+    saved = raw ? JSON.parse(raw) : null;
+  } catch { saved = null; }
+
+  const fresh = defaultProfile();
+  if (saved && saved.version === PROFILE_VERSION) {
+    state.profile = { ...fresh, ...saved, points: Array.isArray(saved.points) ? saved.points : [] };
+  } else if (saved && saved.version === 2) {
+    state.profile = { ...fresh, headingOffset: saved.headingOffset || 0, pitchOffset: saved.pitchOffset || 0,
+      fovH: saved.fovH || fresh.fovH, calLat: saved.calLat != null ? saved.calLat : null, calLon: saved.calLon != null ? saved.calLon : null };
+  } else {
+    state.profile = { ...fresh, fovH: saved && saved.fovH ? saved.fovH : fresh.fovH };
   }
   els.fov.value = state.profile.fovH;
   els.fovOut.textContent = state.profile.fovH;
@@ -79,16 +94,13 @@ async function detectDevice() {
   return `${navigator.platform || "unknown"} ${screen.width}x${screen.height}`;
 }
 
-// Declination is applied automatically now; the calibration offset only covers
-// device/phone bias. Far from the calibration spot, the bias itself may differ, so
-// the panel suggests recalibrating.
-const CAL_MAX_DISTANCE_M = 50000;
-
 function renderCalInfo() {
   const p = state.profile;
+  const n = p.points.length;
+  const hasBase = p.headingOffset || p.pitchOffset;
+  const hasCal = n > 0 || hasBase;
   els.calInfo.textContent =
-    `Device: ${state.device}\nHeading correction ${p.headingOffset.toFixed(1)}°, pitch correction ${p.pitchOffset.toFixed(1)}°, field of view ${p.fovH}°.`;
-  const hasCal = p.headingOffset || p.pitchOffset;
+    `Device: ${state.device}\nCalibration points: ${n}. Field of view ${p.fovH}°.`;
   let line = `Device: ${state.device}. ` +
     (hasCal ? "Saved calibration found and applied." : "No calibration yet. Calibrate on the target once you can see it.");
   if (hasCal && p.calLat != null && state.user &&
@@ -108,26 +120,37 @@ function canAdvance() {
 
 function goTo(step) {
   state.step = Math.max(STEP_TARGET, Math.min(STEP_LIVE, step));
+  if (state.step !== STEP_LIVE) state.sheetOpen = false;
   renderSteps();
 }
 
 function renderSteps() {
   const s = state.step;
-  els.cards.forEach((c) => c.classList.toggle("on", Number(c.dataset.step) === s));
+  const inLive = s === STEP_LIVE;
+  // In the live step the target picker becomes a bottom sheet that is only shown when opened.
+  els.cards.forEach((c) => {
+    const n = Number(c.dataset.step);
+    const isSheet = inLive && n === STEP_TARGET;
+    c.classList.toggle("sheet", isSheet);
+    c.classList.toggle("on", isSheet ? state.sheetOpen : n === s);
+  });
   els.stepItems.forEach((li, i) => {
     li.classList.toggle("current", i === s);
     li.classList.toggle("done", i < s);
   });
-  els.progressFill.style.width = `${(s / (STEP_LIVE)) * 100}%`;
+  els.progressFill.style.width = `${(s / STEP_LIVE) * 100}%`;
   els.back.disabled = s === STEP_TARGET;
-  els.next.style.display = s === STEP_LIVE ? "none" : "";
+  els.next.style.display = inLive ? "none" : "";
   els.next.disabled = !canAdvance();
   els.next.textContent = s === STEP_ACCESS ? "Go live" : "Next";
   els.canvas.classList.toggle("calibrating", state.calibrating);
+  els.targetLine.textContent = state.target
+    ? `Target: ${state.target.name.split(",")[0]}`
+    : "No target chosen yet.";
 }
 
 els.back.addEventListener("click", () => goTo(state.step - 1));
-els.next.addEventListener("click", async () => {
+els.next.addEventListener("click", () => {
   if (state.step === STEP_ACCESS) {
     goTo(STEP_LIVE);
     renderCalInfo();
@@ -136,7 +159,24 @@ els.next.addEventListener("click", async () => {
   goTo(state.step + 1);
 });
 
-// ---------- step 1: target search ----------
+els.changeTarget.addEventListener("click", () => { state.sheetOpen = true; renderSteps(); });
+els.sheetDone.addEventListener("click", () => { state.sheetOpen = false; renderSteps(); });
+
+// ---------- full screen (not available on iPhone Safari) ----------
+
+if (!document.documentElement.requestFullscreen) {
+  els.fullscreen.hidden = true;
+} else {
+  els.fullscreen.addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen().catch(() => { /* refused: stay windowed */ });
+  });
+  document.addEventListener("fullscreenchange", () => {
+    els.fullscreen.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+  });
+}
+
+// ---------- target search (step 1, and the sheet in the live view) ----------
 
 els.search.addEventListener("click", searchPlace);
 els.place.addEventListener("keydown", (e) => { if (e.key === "Enter") searchPlace(); });
@@ -185,6 +225,7 @@ function renderCandidates(fresh = false) {
     btn.addEventListener("click", () => {
       state.target = c;
       els.hintTarget.textContent = `Target set: ${c.name}`;
+      if (state.step === STEP_LIVE) state.sheetOpen = false; // back to the live view with the new target
       renderCandidates();
       renderSteps();
     });
@@ -245,7 +286,6 @@ async function startAccess() {
     state.gpsWatch = navigator.geolocation.watchPosition(
       (pos) => {
         state.user = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-        state.gpsAccuracy = pos.coords.accuracy;
         state.declDeg = declinationDeg(pos.coords.latitude, pos.coords.longitude);
         state.gpsOk = true;
         els.stGps.textContent = `±${Math.round(pos.coords.accuracy)} m`;
@@ -282,25 +322,47 @@ function onOrientation(e) {
 
 // ---------- step 3: live overlay ----------
 
+// Aim from the sensors only (true north, no saved correction).
+function rawAim() {
+  const sensorOn = !!state.vec && performance.now() - state.lastSensor < SENSOR_TIMEOUT_MS;
+  const r = sensorOn ? vectorToAim(state.vec) : { heading: 0, pitch: 0 };
+  // Sensor heading is magnetic north; add declination to get true north (spec §3.2).
+  return { sensorOn, heading: (r.heading + state.declDeg + 360) % 360, pitch: r.pitch };
+}
+
+// Total correction to add to a raw aim. With calibration points, nearby points are
+// blended with inverse-square weights; with none, the constant base offset is used.
+function correction(h, p) {
+  const pts = state.profile.points;
+  if (!pts.length) return { dh: state.profile.headingOffset, dp: state.profile.pitchOffset };
+  const ref = pts[0].errH; // blend heading errors relative to one point to avoid wrap-around
+  let sw = 0, sh = 0, sp = 0;
+  for (const q of pts) {
+    const dh = wrap180(q.h - h) * Math.cos((p * Math.PI) / 180);
+    const dp = q.p - p;
+    const w = 1 / (dh * dh + dp * dp + 4);
+    sw += w;
+    sh += w * wrap180(q.errH - ref);
+    sp += w * (q.errP);
+  }
+  return { dh: wrap180(ref + sh / sw), dp: sp / sw };
+}
+
 // Current aim with saved corrections applied, in the same frame as the video.
 function currentAim() {
-  const sensorOn = state.vec && performance.now() - state.lastSensor < SENSOR_TIMEOUT_MS;
-  const raw = sensorOn ? vectorToAim(state.vec) : { heading: 0, pitch: 0 };
-  // Sensor heading is magnetic north; add declination to get true north (spec §3.2).
-  return {
-    sensorOn,
-    heading: (raw.heading + state.declDeg + state.profile.headingOffset + 720) % 360,
-    pitch: raw.pitch + state.profile.pitchOffset,
-  };
+  const a = rawAim();
+  const c = correction(a.heading, a.pitch);
+  return { sensorOn: a.sensorOn, heading: (a.heading + c.dh + 360) % 360, pitch: a.pitch + c.dp };
 }
 
 function projectTarget(W, H) {
+  const aim = currentAim();
   return project({
     user: state.user,
     target: state.target,
     heightDiffM: state.heightDiffM,
-    headingDeg: currentAim().heading,
-    pitchDeg: currentAim().pitch,
+    headingDeg: aim.heading,
+    pitchDeg: aim.pitch,
     fovHDeg: state.profile.fovH,
     width: W,
     height: H,
@@ -324,7 +386,7 @@ function frame() {
 
   // The 70° field of view only holds for the sensor's long side, so the overlay is landscape-only.
   if (window.matchMedia("(orientation: portrait)").matches) return setLiveMsg("Rotate your phone to landscape.");
-  if (!state.target) return setLiveMsg("No target chosen. Go back to step 1.");
+  if (!state.target) return setLiveMsg("No target chosen. Tap Change target.");
   if (!state.user) return setLiveMsg("Waiting for GPS…");
   if (!state.vec) return setLiveMsg("Waiting for compass… (move the phone)");
   if (!currentAim().sensorOn) return setLiveMsg("Compass stopped sending data. Move the phone or restart sensors.");
@@ -390,6 +452,8 @@ function drawBeacon(ctx, x, y, label, W, dimmed) {
 }
 
 // ---------- calibration: tap the target building ----------
+// Each tap is stored as its own point. Taps at different positions on screen (the target
+// near the left edge, then near the right edge, etc.) correct different parts of the view.
 
 els.calibrate.addEventListener("click", () => {
   if (!state.target || !state.user || !state.vec) {
@@ -397,9 +461,9 @@ els.calibrate.addEventListener("click", () => {
     return;
   }
   state.calibrating = !state.calibrating;
-  els.calibrate.textContent = state.calibrating ? "Cancel calibration" : "Calibrate on target";
+  els.calibrate.textContent = state.calibrating ? "Cancel calibration" : "Add calibration point";
   els.calHint.textContent = state.calibrating
-    ? "Line up the crosshair with the middle of the target building, then tap it on the picture."
+    ? "Line up the crosshair with the target building, then tap it on the picture. For better accuracy, add points with the target at different spots in the view (left, right, top, bottom)."
     : "";
   renderSteps();
 });
@@ -411,31 +475,49 @@ els.canvas.addEventListener("click", (e) => {
   const tx = (e.clientX - rect.left) * (W / rect.width);
   const ty = (e.clientY - rect.top) * (H / rect.height);
 
-  const p = projectTarget(W, H);            // where the target is relative to current (corrected) aim
+  state.calibrating = false;
+  els.calibrate.textContent = "Add calibration point";
+
   const ppdH = W / state.profile.fovH;
   const ppdV = H / fovVDeg(state.profile.fovH, W, H);
-  const tapTheta = (tx - W / 2) / ppdH;     // where the tapped point really is, relative to centre
+  const tapTheta = (tx - W / 2) / ppdH;   // where the tapped point is, relative to view centre
   const tapPhi = -(ty - H / 2) / ppdV;
 
-  const corrH = wrap180(p.dTheta - tapTheta);
-  const corrP = p.dPhi - tapPhi;
+  // Raw sensor aim at this moment; the point stores the total correction that would put
+  // the target exactly under the tap.
+  const a = rawAim();
+  if (!a.sensorOn) {
+    els.calHint.textContent = "Compass has no data right now. Move the phone and try again.";
+    renderSteps();
+    return;
+  }
+  const p = project({
+    user: state.user, target: state.target, heightDiffM: state.heightDiffM,
+    headingDeg: a.heading, pitchDeg: a.pitch, fovHDeg: state.profile.fovH, width: W, height: H,
+  });
+  const errH = wrap180((p.bearing - tapTheta) - a.heading);
+  const errP = (p.elev - tapPhi) - a.pitch;
 
-  state.calibrating = false;
-  els.calibrate.textContent = "Calibrate on target";
-  if (Math.abs(corrH) > CAL_MAX_CORRECTION || Math.abs(corrP) > CAL_MAX_CORRECTION) {
+  // Reject taps far from what the existing calibration predicts for this view.
+  const cur = correction(a.heading, a.pitch);
+  const jumpH = wrap180(errH - cur.dh), jumpP = errP - cur.dp;
+  if (Math.abs(jumpH) > CAL_MAX_CORRECTION || Math.abs(jumpP) > CAL_MAX_CORRECTION) {
     els.calHint.textContent =
-      `That correction would be ${corrH.toFixed(0)}° / ${corrP.toFixed(0)}°, which is too large. ` +
+      `That tap disagrees with the saved calibration by ${jumpH.toFixed(0)}° / ${jumpP.toFixed(0)}°. ` +
       "Probably the wrong spot was tapped. Try again, or check the target is the building you see.";
     renderSteps();
     return;
   }
-  state.profile.headingOffset = wrap180(state.profile.headingOffset + corrH);
-  state.profile.pitchOffset += corrP;
+
+  const pts = state.profile.points;
+  pts.push({ h: a.heading, p: a.pitch, errH, errP });
+  if (pts.length > CAL_MAX_POINTS) pts.shift();
   state.profile.calLat = state.user.lat;
   state.profile.calLon = state.user.lon;
   saveProfile();
   els.calHint.textContent =
-    `Calibrated: heading ${corrH >= 0 ? "+" : ""}${corrH.toFixed(1)}°, pitch ${corrP >= 0 ? "+" : ""}${corrP.toFixed(1)}°. Saved for this device.`;
+    `Point ${pts.length} saved (heading ${errH >= 0 ? "+" : ""}${errH.toFixed(1)}°, pitch ${errP >= 0 ? "+" : ""}${errP.toFixed(1)}°). ` +
+    "Add more points with the target at other spots in the view for better accuracy.";
   renderSteps();
 });
 
@@ -453,7 +535,7 @@ els.height.addEventListener("input", () => {
 });
 
 els.resetCal.addEventListener("click", () => {
-  state.profile = { ...DEFAULT_PROFILE, fovH: state.profile.fovH };
+  state.profile = { ...defaultProfile(), fovH: state.profile.fovH };
   saveProfile();
   els.calHint.textContent = "Calibration reset for this device.";
 });
@@ -465,6 +547,7 @@ els.resetCal.addEventListener("click", () => {
   loadProfile();
   renderCalInfo();
   renderSteps();
+  renderCandidates();
   requestAnimationFrame(frame);
   document.body.dataset.ready = "1"; // index.html shows a notice if this never happens
 })();
