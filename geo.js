@@ -65,17 +65,23 @@ export function blendVector(prev, next, k) {
   return { east: e / len, north: n / len, up: u / len };
 }
 
-// Angle above horizon to a point at ground distance dist and height heightDiffM above the
-// observer, minus Earth curvature and refraction (full spec §6.2.2, k = 0.13).
+// Angle above horizon to a point at ground distance distM and height heightDiffM above the
+// observer's eye, minus Earth curvature and refraction (full spec §6.2.2, k = 0.13).
 export function elevationDeg(distM, heightDiffM) {
   const curvatureDeg = toDeg((distM / (2 * R)) * (1 - REFRACTION_K));
   return toDeg(Math.atan2(heightDiffM, distM)) - curvatureDeg;
 }
 
+// Inverse of elevationDeg: the height difference that gives elevation angle elevDeg at distM.
+export function heightForElevation(distM, elevDeg) {
+  const curvatureDeg = toDeg((distM / (2 * R)) * (1 - REFRACTION_K));
+  return distM * Math.tan(toRad(elevDeg + curvatureDeg));
+}
+
 // Flat-plane projection of the target onto the photo.
 //   headingDeg : camera azimuth, true north = 0, clockwise positive
 //   pitchDeg   : camera tilt, 0 = horizon, positive = looking up
-//   heightDiffM: target height minus observer height (metres), 0 if unknown
+//   heightDiffM: target height minus observer eye height (metres)
 export function project({ user, target, heightDiffM, headingDeg, pitchDeg, fovHDeg, width, height }) {
   const dist = distanceM(user.lat, user.lon, target.lat, target.lon);
   const bearing = bearingDeg(user.lat, user.lon, target.lat, target.lon);
@@ -95,25 +101,39 @@ export function project({ user, target, heightDiffM, headingDeg, pitchDeg, fovHD
 }
 
 // Calibration from landmarks the user can see and has tapped.
-// Each point: { uLat, uLon, tLat, tLon, hDiff, rawH, rawP, dx, dy, aspect }
-//   rawH/rawP : sensor aim at the tap (true heading, pitch) before any correction
-//   dx        : tapped x offset from image centre, as a fraction of image width  (+ = right)
-//   dy        : tapped y offset from image centre, as a fraction of image height (+ = up)
-//   aspect    : image height / width
-// Model: the true angle to the landmark is the screen angle, so
+// Each point:
+//   uLat, uLon : user position when tapped
+//   tLat, tLon : landmark position (map)
+//   groundDiffM: ground height at the landmark minus eye height at the user (metres), from terrain data
+//   bh         : height of the tapped spot above the landmark's ground (m), or null if unknown
+//   rawH, rawP : sensor aim at the tap (true heading, pitch) before any correction
+//   dx         : tapped x offset from image centre, as a fraction of image width  (+ = right)
+//   dy         : tapped y offset from image centre, as a fraction of image height (+ = up)
+//   aspect     : image height / width
+//
+// Model: the true angle to the tapped spot is the screen angle, so
 //   dx * F = (bearing - rawH) - headingOffset      (horizontal, F = horizontal FOV)
 //   dy * fovV = elevation - (rawP + pitchOffset)   (vertical)
+// Heading and FOV use every point (horizontal angles do not depend on height). The pitch offset
+// uses only points whose height is known, since their elevation is then known. A point with
+// unknown height gets its height inferred from its tap once the pitch offset is known.
+//
 // With 2+ points, F and headingOffset come from a least-squares line fit; with 1 point, F is
-// taken from fovFallbackDeg. pitchOffset is the mean of the vertical residuals.
-// Returns { fovH, headingOffset, pitchOffset, residualH, residualP, count } or { error }.
+// taken from fovFallbackDeg. Returns
+//   { fovH, headingOffset, pitchOffset, residualH, residualP, count, heights }
+// where heights[i] is the spot's height above the landmark's ground (known or inferred), or { error }.
 export function fitCalibration(points, fovFallbackDeg) {
   const n = points.length;
   if (!n) return { error: "no points" };
   const obs = points.map((q) => {
     const dist = distanceM(q.uLat, q.uLon, q.tLat, q.tLon);
+    const known = q.bh !== null && q.bh !== undefined;
     return {
+      dist,
       D: wrap180(bearingDeg(q.uLat, q.uLon, q.tLat, q.tLon) - q.rawH),
-      E: elevationDeg(dist, q.hDiff),
+      known,
+      hDiff: known ? q.groundDiffM + q.bh : null,
+      groundDiffM: q.groundDiffM,
       rawP: q.rawP, dx: q.dx, dy: q.dy, aspect: q.aspect,
     };
   });
@@ -137,18 +157,29 @@ export function fitCalibration(points, fovFallbackDeg) {
   if (fov < 30 || fov > 110) return { error: `field of view ${fov.toFixed(0)}° is implausible` };
 
   const fovVs = obs.map((o) => fovVDeg(fov, 1, o.aspect));
+  const ref = obs.filter((o) => o.known);
+  if (!ref.length) return { error: "needs one landmark at ground level or with a known height first" };
   let pitchOffset = 0;
-  obs.forEach((o, i) => { pitchOffset += (o.E - o.rawP - o.dy * fovVs[i]) / n; });
+  ref.forEach((o) => {
+    const i = obs.indexOf(o);
+    pitchOffset += (elevationDeg(o.dist, o.hDiff) - o.rawP - o.dy * fovVs[i]) / ref.length;
+  });
+
+  // Heights of unknown spots, from the tap under the fitted pitch offset.
+  const heights = obs.map((o, i) => {
+    if (o.known) return o.hDiff - o.groundDiffM;
+    const elev = o.rawP + pitchOffset + o.dy * fovVs[i];
+    return heightForElevation(o.dist, elev) - o.groundDiffM;
+  });
 
   let residualH = 0, residualP = 0;
   obs.forEach((o, i) => {
     residualH = Math.max(residualH, Math.abs((o.D - headingOffset) - fov * o.dx));
-    residualP = Math.max(residualP, Math.abs((o.E - o.rawP - pitchOffset) - o.dy * fovVs[i]));
+    if (o.known) residualP = Math.max(residualP, Math.abs((elevationDeg(o.dist, o.hDiff) - o.rawP - pitchOffset) - o.dy * fovVs[i]));
   });
 
-  // A large heading correction is normal for an uncalibrated phone (magnetic error), so only
-  // pitch, which is physically limited, is bounded.
+  // Pitch is physically limited; heading is not bounded (an uncalibrated phone can be far off).
   headingOffset = wrap180(headingOffset);
   if (Math.abs(pitchOffset) > 45) return { error: `pitch correction ${pitchOffset.toFixed(0)}° is too large` };
-  return { fovH: fov, headingOffset, pitchOffset, residualH, residualP, count: n };
+  return { fovH: fov, headingOffset, pitchOffset, residualH, residualP, count: n, heights };
 }

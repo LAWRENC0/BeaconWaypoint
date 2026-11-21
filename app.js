@@ -1,21 +1,24 @@
 import { project, fovVDeg, cameraVector, vectorToAim, blendVector, wrap180, distanceM, fitCalibration } from "./geo.js";
 import { declinationDeg } from "./vendor/declination.js";
+import { groundElevation } from "./elevation.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
   stepItems: [...document.querySelectorAll("#stepper li")],
   cards: [...document.querySelectorAll(".step")],
-  targetCard: document.querySelector('.step[data-step="0"]'),
   targetTitle: $("target-title"), targetLead: $("target-lead"),
   place: $("place"), search: $("search"), candidates: $("candidates"), hintTarget: $("hint-target"),
   changeTarget: $("change-target"), sheetDone: $("sheet-done"), targetLine: $("target-line"),
-  calHeight: $("cal-height"), fullscreen: $("fullscreen"),
+  calKindRadios: [...document.querySelectorAll('input[name="cal-kind"]')],
+  fullscreen: $("fullscreen"),
   camRow: $("cam-row"), camSelect: $("cam-select"),
   startAccess: $("start-access"), hintAccess: $("hint-access"), deviceLine: $("device-line"),
   stCam: $("st-cam"), stGps: $("st-gps"), stSensor: $("st-sensor"),
   cam: $("cam"), canvas: $("live"), liveMsg: $("liveMsg"),
   calibrate: $("calibrate"), calHint: $("cal-hint"), calInfo: $("cal-info"), resetCal: $("reset-cal"), undoCal: $("undo-cal"),
   showLandmarks: $("show-landmarks"),
+  pendPanel: $("pend-panel"), pendHeight: $("pend-height"), pendOut: $("pend-out"),
+  pendSave: $("pend-save"), pendDiscard: $("pend-discard"),
   fov: $("fov"), fovOut: $("fovOut"), height: $("height"), heightOut: $("heightOut"),
   back: $("back"), next: $("next"), progressFill: $("progress-fill"),
 };
@@ -26,12 +29,16 @@ const SENSOR_TIMEOUT_MS = 1000;    // no sensor event for this long = compass co
 const MAX_DISTANCE_M = 70000;      // flat-plane model is only valid to ~70 km (LTP/MVP spec gate)
 const CAL_MAX_DISTANCE_M = 50000;  // calibration is flagged when used farther than this from where it was made
 const CAL_RESIDUAL_WARN = 3;       // degrees: landmarks disagreeing by more than this are flagged
+const EYE_HEIGHT = 1.6;            // metres from ground to the phone camera, when standing
+const GROUND_REFRESH_M = 150;      // look up the user's terrain height again after moving this far
+const GROUND_RETRY_MS = 10000;     // wait this long after a failed terrain lookup
 
 // Profile versions:
 //   2: one global heading/pitch offset
 //   3: per-tap points (replaced by landmarks)
-//   4: landmarks the user identified and tapped; offsets and FOV are fitted from them
-const PROFILE_VERSION = 4;
+//   4: landmarks with a height entered by the user (hDiff)
+//   5: landmarks with terrain-based ground difference (groundDiffM) and spot height above ground (bh, null = inferred)
+const PROFILE_VERSION = 5;
 function defaultProfile() {
   return { version: PROFILE_VERSION, fovH: 70, headingOffset: 0, pitchOffset: 0, landmarks: [], calLat: null, calLon: null };
 }
@@ -39,8 +46,11 @@ function defaultProfile() {
 const state = {
   step: STEP_TARGET,
   candidates: [],
-  target: null,        // { lat, lon, name }
+  target: null,        // { lat, lon, name, ground }  ground = terrain height in metres, once looked up
   user: null,          // { lat, lon }
+  userGround: null,    // terrain height at the user's position, metres
+  userGroundAt: null,  // where userGround was looked up
+  lastGroundTry: 0,
   stream: null,
   cameraId: null,      // camera chosen by the user (deviceId), null = browser default back camera
   cameraKey: null,     // deviceId of the camera actually in use
@@ -51,12 +61,13 @@ const state = {
   sheetOpen: false,    // target picker shown over the live view
   sheetMode: "target", // "target" = choose what to find; "cal" = choose a landmark to calibrate on
   calibrating: false,  // waiting for a tap on the calibration landmark
-  showLandmarks: false,// draw every saved landmark, to check the calibration by eye
   calTarget: null,     // landmark being tapped during calibration
-  calHeight: 0,        // landmark height above the user's eyes (m), entered in the sheet
+  calKind: "ground",   // "ground" = tap the base of something; "top" = tap the top
+  pending: null,       // a measured top, waiting for the user to confirm its height: { point, bh, adjusted }
+  showLandmarks: false,// draw every saved landmark, to check the calibration by eye
   device: "unknown device",
   profile: defaultProfile(),
-  heightDiffM: 0,
+  heightDiffM: 0,      // target height above its ground, from the slider (m)
   declDeg: 0,          // magnetic declination at the user's position (east positive)
 };
 
@@ -75,6 +86,11 @@ function loadProfile() {
   const fresh = defaultProfile();
   if (saved && saved.version === PROFILE_VERSION) {
     state.profile = { ...fresh, ...saved, landmarks: Array.isArray(saved.landmarks) ? saved.landmarks : [] };
+  } else if (saved && saved.version === 4) {
+    // The height a user typed becomes the ground difference, with the spot taken as the ground.
+    const lm = Array.isArray(saved.landmarks) ? saved.landmarks : [];
+    state.profile = { ...fresh, ...saved, version: PROFILE_VERSION,
+      landmarks: lm.map((l) => ({ ...l, groundDiffM: l.hDiff, bh: 0 })) };
   } else if (saved && saved.version === 3) {
     // Keep the averaged per-tap correction as the offset; the tap points themselves are not landmarks.
     const pts = Array.isArray(saved.points) ? saved.points : [];
@@ -125,7 +141,39 @@ function renderCalInfo() {
       distanceM(p.calLat, p.calLon, state.user.lat, state.user.lon) > CAL_MAX_DISTANCE_M) {
     line += " You are far from where it was calibrated. Consider recalibrating here.";
   }
+  if (state.user && state.userGround === null) line += " Terrain height not loaded yet (needs internet).";
   els.deviceLine.textContent = line;
+}
+
+// ---------- terrain ----------
+
+// Terrain height at the user's position. Looked up again only after moving a good distance.
+async function refreshUserGround() {
+  if (!state.user) return;
+  const now = Date.now();
+  if (now - state.lastGroundTry < GROUND_RETRY_MS) return;
+  if (state.userGroundAt && distanceM(state.userGroundAt.lat, state.userGroundAt.lon, state.user.lat, state.user.lon) < GROUND_REFRESH_M) return;
+  state.lastGroundTry = now;
+  const at = { lat: state.user.lat, lon: state.user.lon };
+  const g = await groundElevation(at.lat, at.lon);
+  if (g !== null) {
+    state.userGround = g;
+    state.userGroundAt = at;
+    renderCalInfo();
+  }
+}
+
+// Height of a point at ground level `ground` above the user's eye, from terrain data.
+function groundDiffFor(ground) {
+  if (ground == null || state.userGround == null) return null;
+  return ground - (state.userGround + EYE_HEIGHT);
+}
+
+// Navigation target: its terrain height plus the slider (height of the target above ground).
+// Without terrain data the slider is used alone, as before.
+function targetHeightDiff(target) {
+  const gd = groundDiffFor(target.ground);
+  return gd === null ? state.heightDiffM : gd + state.heightDiffM;
 }
 
 // ---------- navigation ----------
@@ -138,7 +186,7 @@ function canAdvance() {
 
 function goTo(step) {
   state.step = Math.max(STEP_TARGET, Math.min(STEP_LIVE, step));
-  if (state.step !== STEP_LIVE) { state.sheetOpen = false; state.calibrating = false; state.calTarget = null; }
+  if (state.step !== STEP_LIVE) cancelCalibration();
   renderSteps();
 }
 
@@ -169,7 +217,8 @@ function renderSteps() {
   els.next.disabled = !canAdvance();
   els.next.textContent = s === STEP_ACCESS ? "Go live" : "Next";
   els.canvas.classList.toggle("calibrating", state.calibrating);
-  els.calibrate.textContent = state.calibrating ? "Cancel calibration" : "Calibrate with landmarks";
+  els.calibrate.textContent = state.calibrating || state.pending ? "Cancel calibration" : "Calibrate with landmarks";
+  els.pendPanel.hidden = !state.pending;
   els.targetLine.textContent = state.target
     ? `Target: ${state.target.name.split(",")[0]}`
     : "No target chosen yet.";
@@ -188,20 +237,24 @@ els.next.addEventListener("click", () => {
 function openSheet(mode) {
   state.sheetMode = mode;
   state.sheetOpen = true;
-  state.calibrating = false;
-  state.calTarget = null;
+  cancelCalibration();
   els.calHint.textContent = "";
   renderCandidates();
   renderSteps();
+}
+
+function cancelCalibration() {
+  state.calibrating = false;
+  state.calTarget = null;
+  state.pending = null;
 }
 
 els.changeTarget.addEventListener("click", () => openSheet("target"));
 els.sheetDone.addEventListener("click", () => { state.sheetOpen = false; renderSteps(); });
 
 els.calibrate.addEventListener("click", () => {
-  if (state.calibrating) {
-    state.calibrating = false;
-    state.calTarget = null;
+  if (state.calibrating || state.pending) {
+    cancelCalibration();
     els.calHint.textContent = "Calibration cancelled.";
     renderSteps();
     return;
@@ -279,19 +332,30 @@ function renderCandidates(fresh = false) {
   });
 }
 
-function pickCandidate(c) {
+async function pickCandidate(c) {
   if (state.sheetMode === "cal" && state.step === STEP_LIVE && state.sheetOpen) {
     // Calibration: this place is a landmark to tap, not the navigation target.
+    els.calHint.textContent = "Looking up the terrain height…";
+    const g = await groundElevation(c.lat, c.lon);
+    if (g === null || state.userGround === null) {
+      els.calHint.textContent = "Terrain height is not available right now (needs internet and your location). Try again.";
+      return;
+    }
+    c.ground = g;
     state.calTarget = c;
-    state.calHeight = parseFloat(els.calHeight.value) || 0;
+    state.calKind = els.calKindRadios.find((r) => r.checked).value;
     state.calibrating = true;
     state.sheetOpen = false;
-    els.calHint.textContent = "";
+    els.calHint.textContent = state.calKind === "top"
+      ? "Tap the top of this object on the picture."
+      : "Tap the base of this object on the picture.";
     renderCandidates();
     renderSteps();
     return;
   }
   state.target = c;
+  c.ground = undefined;
+  groundElevation(c.lat, c.lon).then((g) => { c.ground = g; renderCalInfo(); });
   els.hintTarget.textContent = `Target set: ${c.name}`;
   if (state.step === STEP_LIVE) state.sheetOpen = false; // back to the live view with the new target
   renderCandidates();
@@ -345,6 +409,7 @@ async function startAccess() {
         state.gpsOk = true;
         els.stGps.textContent = `±${Math.round(pos.coords.accuracy)} m`;
         els.stGps.className = pos.coords.accuracy > 30 ? "warn" : "ok";
+        refreshUserGround();
         renderSteps();
       },
       (err) => {
@@ -460,12 +525,20 @@ function activeTarget() {
   return state.calibrating && state.calTarget ? state.calTarget : state.target;
 }
 
+function heightDiffFor(target) {
+  if (state.calibrating && target === state.calTarget) {
+    const gd = groundDiffFor(target.ground);
+    return gd === null ? 0 : gd; // landmark: ground level until a top is tapped
+  }
+  return targetHeightDiff(target);
+}
+
 function projectTarget(W, H, target) {
   const aim = currentAim();
   return project({
     user: state.user,
     target,
-    heightDiffM: state.calibrating ? state.calHeight : state.heightDiffM,
+    heightDiffM: heightDiffFor(target),
     headingDeg: aim.heading,
     pitchDeg: aim.pitch,
     fovHDeg: state.profile.fovH,
@@ -498,20 +571,26 @@ function frame() {
   if (!currentAim().sensorOn) return setLiveMsg("Compass stopped sending data. Move the phone or restart sensors.");
 
   if (state.showLandmarks) drawLandmarks(ctx, W, H);
+  if (state.pending) drawPending(ctx, W, H);
 
   const p = projectTarget(W, H, target);
   const distTxt = p.dist >= 1000 ? `${(p.dist / 1000).toFixed(2)} km` : `${Math.round(p.dist)} m`;
-  if (state.calibrating) {
-    // Landmark tapping: show where it should be, but do not treat it as the navigation target.
-    if (p.dist > MAX_DISTANCE_M) return setLiveMsg(`${target.name.split(",")[0]} is too far to use as a landmark (${distTxt}).`);
-  } else if (p.dist > MAX_DISTANCE_M) {
-    return setLiveMsg(`Target is ${distTxt} away. Beyond the ${MAX_DISTANCE_M / 1000} km limit of this model.`);
+  if (p.dist > MAX_DISTANCE_M) {
+    return setLiveMsg(state.calibrating
+      ? `${target.name.split(",")[0]} is too far to use as a landmark (${distTxt}).`
+      : `Target is ${distTxt} away. Beyond the ${MAX_DISTANCE_M / 1000} km limit of this model.`);
   }
   const label = `${target.name.split(",")[0]} · ${distTxt}`;
 
+  if (state.calibrating) {
+    if (p.inFrame) drawBeacon(ctx, p.x, p.y, label, W, false);
+    setLiveMsg(`Tap "${target.name.split(",")[0]}" on the picture · ${distTxt}`);
+    return;
+  }
+
   if (p.inFrame) {
     drawBeacon(ctx, p.x, p.y, label, W, false);
-    setLiveMsg(state.calibrating ? `Tap "${target.name.split(",")[0]}" on the picture · ${distTxt}` : `On target · ${distTxt}`);
+    setLiveMsg(`On target · ${distTxt}`);
   } else {
     const cx = Math.min(Math.max(p.x, 0), W), cy = Math.min(Math.max(p.y, 0), H);
     drawBeacon(ctx, cx, cy, label, W, true);
@@ -520,36 +599,8 @@ function frame() {
     if (p.dTheta > 1) hint.push(`turn ${p.dTheta.toFixed(0)}° right`);
     if (p.dPhi > 1) hint.push(`tilt ${p.dPhi.toFixed(0)}° up`);
     if (p.dPhi < -1) hint.push(`tilt ${Math.abs(p.dPhi).toFixed(0)}° down`);
-    setLiveMsg(`${state.calibrating ? "Landmark" : "Target"} ${hint.join(", ") || "nearby"} · ${distTxt}`);
+    setLiveMsg(`Target ${hint.join(", ") || "nearby"} · ${distTxt}`);
   }
-}
-
-// Each saved landmark drawn at its position under the current calibration. If the
-// calibration is consistent, every ring sits on its building as the phone is panned.
-function drawLandmarks(ctx, W, H) {
-  state.profile.landmarks.forEach((q, i) => {
-    const p = project({
-      user: state.user, target: { lat: q.tLat, lon: q.tLon }, heightDiffM: q.hDiff,
-      headingDeg: currentAim().heading, pitchDeg: currentAim().pitch,
-      fovHDeg: state.profile.fovH, width: W, height: H,
-    });
-    if (!p.inFrame) return;
-    const r = Math.max(10, W / 60);
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    ctx.lineWidth = Math.max(2, r / 5);
-    ctx.strokeStyle = "#00e5ff";
-    ctx.stroke();
-    ctx.font = `bold ${Math.max(14, r)}px system-ui, sans-serif`;
-    ctx.lineWidth = Math.max(3, r / 4);
-    ctx.strokeStyle = "rgba(0,0,0,0.8)";
-    ctx.fillStyle = "#00e5ff";
-    const label = `${i + 1} ${q.name.split(",")[0]}`;
-    ctx.strokeText(label, p.x + r * 1.3, p.y + r * 0.4);
-    ctx.fillText(label, p.x + r * 1.3, p.y + r * 0.4);
-    ctx.restore();
-  });
 }
 
 let lastMsg = "";
@@ -592,17 +643,61 @@ function drawBeacon(ctx, x, y, label, W, dimmed) {
   ctx.restore();
 }
 
-// ---------- calibration: tap known landmarks ----------
-// Each tapped landmark is a known bearing and elevation, paired with the screen position
-// the user tapped. geo.js fitCalibration() solves heading offset, pitch offset and FOV.
+// Ring with a text label, used for saved landmarks and the pending top.
+function drawRing(ctx, x, y, text, color, W) {
+  const r = Math.max(10, W / 60);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.lineWidth = Math.max(2, r / 5);
+  ctx.strokeStyle = color;
+  ctx.stroke();
+  ctx.font = `bold ${Math.max(14, r)}px system-ui, sans-serif`;
+  ctx.lineWidth = Math.max(3, r / 4);
+  ctx.strokeStyle = "rgba(0,0,0,0.8)";
+  ctx.fillStyle = color;
+  ctx.strokeText(text, x + r * 1.3, y + r * 0.4);
+  ctx.fillText(text, x + r * 1.3, y + r * 0.4);
+  ctx.restore();
+}
 
-function refitProfile(landmarks) {
-  const fit = fitCalibration(landmarks, state.profile.fovH);
-  if (fit.error) return fit;
+// Each saved landmark at its position under the current calibration. If the calibration is
+// consistent, every ring sits on its spot as the phone is panned.
+function drawLandmarks(ctx, W, H) {
+  const lm = state.profile.landmarks;
+  const fit = fitCalibration(lm, state.profile.fovH);
+  const aim = currentAim();
+  lm.forEach((q, i) => {
+    const bh = q.bh !== null && q.bh !== undefined ? q.bh : (fit.heights ? fit.heights[i] : 0);
+    const p = project({
+      user: state.user, target: { lat: q.tLat, lon: q.tLon }, heightDiffM: q.groundDiffM + bh,
+      headingDeg: aim.heading, pitchDeg: aim.pitch, fovHDeg: state.profile.fovH, width: W, height: H,
+    });
+    if (p.inFrame) drawRing(ctx, p.x, p.y, `${i + 1} ${q.name.split(",")[0]}`, "#00e5ff", W);
+  });
+}
+
+// The measured top, drawn at the height the user is confirming.
+function drawPending(ctx, W, H) {
+  const pend = state.pending;
+  const aim = currentAim();
+  const p = project({
+    user: state.user, target: { lat: pend.point.tLat, lon: pend.point.tLon },
+    heightDiffM: pend.point.groundDiffM + pend.bh,
+    headingDeg: aim.heading, pitchDeg: aim.pitch, fovHDeg: state.profile.fovH, width: W, height: H,
+  });
+  if (p.inFrame) drawRing(ctx, p.x, p.y, "top?", "#ffb300", W);
+}
+
+// ---------- calibration: tap known landmarks ----------
+// Each tapped spot is a known bearing, paired with the screen position the user tapped.
+// Its elevation comes from terrain data (base of an object) or from the tap itself (top,
+// once the pitch offset is known). geo.js fitCalibration() solves heading, FOV and pitch.
+
+function applyFit(fit) {
   state.profile.headingOffset = fit.headingOffset;
   state.profile.pitchOffset = fit.pitchOffset;
-  if (fit.count >= 2) state.profile.fovH = fit.fovH; // FOV can only be measured from two or more landmarks
-  return fit;
+  if (fit.count >= 2) state.profile.fovH = fit.fovH; // FOV can only be measured from two or more spots
 }
 
 function describeFit(fit) {
@@ -616,7 +711,7 @@ function describeFit(fit) {
 }
 
 els.canvas.addEventListener("click", (e) => {
-  if (!state.calibrating || !state.calTarget) return;
+  if (!state.calibrating || !state.calTarget || state.pending) return;
   const W = els.canvas.width, H = els.canvas.height;
   const rect = els.canvas.getBoundingClientRect();
   const tx = (e.clientX - rect.left) * (W / rect.width);
@@ -628,8 +723,11 @@ els.canvas.addEventListener("click", (e) => {
     return;
   }
   const target = state.calTarget;
+  const isTop = state.calKind === "top";
   const point = {
-    name: target.name, tLat: target.lat, tLon: target.lon, hDiff: state.calHeight,
+    name: target.name, tLat: target.lat, tLon: target.lon,
+    groundDiffM: groundDiffFor(target.ground),
+    bh: isTop ? null : 0,      // ground spot: height above its ground is zero
     uLat: state.user.lat, uLon: state.user.lon,
     rawH: a.heading, rawP: a.pitch,
     dx: (tx - W / 2) / W,      // + = right of centre, as a fraction of width
@@ -638,20 +736,74 @@ els.canvas.addEventListener("click", (e) => {
   };
 
   state.calibrating = false;
-  state.calTarget = null;
   const candidate = [...state.profile.landmarks, point];
   const fit = fitCalibration(candidate, state.profile.fovH);
   if (fit.error) {
-    els.calHint.textContent = `That tap does not fit the calibration: ${fit.error}. Try the landmark again, or check you tapped the right spot.`;
+    state.calTarget = null;
+    els.calHint.textContent = isTop && fit.error.includes("ground level")
+      ? "Tap the base of something first (ground level), so the app knows the pitch. Then measure tops."
+      : `That tap does not fit the calibration: ${fit.error}. Try again, or check you tapped the right spot.`;
     renderSteps();
     return;
   }
-  state.profile.landmarks = candidate;
-  refitProfile(candidate);
+
+  if (!isTop) {
+    commitLandmark(candidate, fit);
+    state.calTarget = null;
+    els.calHint.textContent = describeFit(fit);
+    renderSteps();
+    return;
+  }
+
+  // Top: show the inferred height and let the user confirm it on the picture.
+  state.pending = { point, bh: fit.heights[candidate.length - 1], adjusted: false };
+  els.pendHeight.value = Math.round(state.pending.bh);
+  els.pendOut.textContent = Math.round(state.pending.bh);
+  const bh = Math.round(state.pending.bh);
+  els.calHint.textContent = `Top measured at about ${bh} m above the ground. ` +
+    (bh < -5 || bh > 300 ? "That is an unusual height, so check the tap. " : "") +
+    "Move the ring onto the top with the slider if needed, then save.";
+  renderSteps();
+});
+
+function commitLandmark(list, fit) {
+  state.profile.landmarks = list;
+  applyFit(fit);
   state.profile.calLat = state.user.lat;
   state.profile.calLon = state.user.lon;
   saveProfile();
-  els.calHint.textContent = describeFit(fit);
+}
+
+els.pendHeight.addEventListener("input", () => {
+  if (!state.pending) return;
+  state.pending.bh = parseFloat(els.pendHeight.value);
+  state.pending.adjusted = true;
+  els.pendOut.textContent = els.pendHeight.value;
+});
+
+els.pendSave.addEventListener("click", () => {
+  const pend = state.pending;
+  if (!pend) return;
+  // A top the user did not adjust keeps its height inferred from the tap, so it stays consistent
+  // when later landmarks change the pitch offset. An adjusted top is a known height.
+  const point = { ...pend.point, bh: pend.adjusted ? pend.bh : null };
+  const candidate = [...state.profile.landmarks, point];
+  const fit = fitCalibration(candidate, state.profile.fovH);
+  if (fit.error) {
+    els.calHint.textContent = `Could not save: ${fit.error}. Adjust the height or discard.`;
+    return;
+  }
+  commitLandmark(candidate, fit);
+  state.pending = null;
+  state.calTarget = null;
+  els.calHint.textContent = `Top saved at about ${Math.round(fit.heights[candidate.length - 1])} m. ${describeFit(fit)}`;
+  renderSteps();
+});
+
+els.pendDiscard.addEventListener("click", () => {
+  state.pending = null;
+  state.calTarget = null;
+  els.calHint.textContent = "Top discarded.";
   renderSteps();
 });
 
@@ -665,8 +817,13 @@ els.undoCal.addEventListener("click", () => {
   if (!lm.length) { els.calHint.textContent = "No landmarks to undo."; return; }
   lm.pop();
   if (lm.length) {
-    refitProfile(lm);
-    els.calHint.textContent = `Removed the last landmark. ${describeFit(fitCalibration(lm, state.profile.fovH))}`;
+    const fit = fitCalibration(lm, state.profile.fovH);
+    if (fit.error) {
+      els.calHint.textContent = `Removed the last landmark. The rest no longer give a calibration (${fit.error}); offsets kept.`;
+    } else {
+      applyFit(fit);
+      els.calHint.textContent = `Removed the last landmark. ${describeFit(fit)}`;
+    }
   } else {
     state.profile.headingOffset = 0;
     state.profile.pitchOffset = 0;
@@ -690,8 +847,10 @@ els.height.addEventListener("input", () => {
 
 els.resetCal.addEventListener("click", () => {
   state.profile = { ...defaultProfile(), fovH: state.profile.fovH };
+  cancelCalibration();
   saveProfile();
   els.calHint.textContent = "Calibration reset for this device.";
+  renderSteps();
 });
 
 // ---------- start ----------
