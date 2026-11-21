@@ -52,7 +52,8 @@
     @keyframes rise { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
     @media (prefers-reduced-motion: reduce) { #candidates li, #progress-fill { animation: none; transition: none; } }
 
-    #live { display: block; width: 100%; height: auto; border-radius: 12px; background: #000; touch-action: manipulation; }
+    /* Keep the whole picture on screen in landscape: cap height, keep the aspect ratio. */
+    #live { display: block; width: auto; height: auto; max-width: 100%; max-height: 72vh; margin: 0 auto; border-radius: 12px; background: #000; touch-action: manipulation; }
     #live.calibrating { cursor: crosshair; outline: 3px solid var(--accent); }
     #liveMsg { font-weight: 600; margin: 10px 0 0; min-height: 1.3em; }
     details { margin-top: 12px; }
@@ -71,6 +72,8 @@
     @keyframes sheetIn { from { transform: translateY(100%); } to { transform: none; } }
     .sheet-only { display: none; }
     .sheet .sheet-only { display: flex; }
+    .cal-only { display: none; }
+    .calmode .cal-only { display: block; }
     @media (prefers-reduced-motion: reduce) { .card.sheet { animation: none; } }
     #target-line { margin: 0 0 8px; font-weight: 600; color: var(--ink); }
     nav { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
@@ -90,8 +93,13 @@
 
   <!-- Step 1: target -->
   <section class="card step" data-step="0">
-    <h2>What are you looking for?</h2>
-    <p class="lead">Type a name or address, then pick the right match from the list.</p>
+    <h2 id="target-title">What are you looking for?</h2>
+    <p class="lead" id="target-lead">Type a name or address, then pick the right match from the list.</p>
+    <div class="cal-only slider">
+      <div class="head">Landmark height above your eyes <output id="cal-heightOut">0</output> m</div>
+      <input id="cal-height" type="number" value="0" step="1" min="-50" max="500" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit;margin-top:6px">
+      <p>Roughly how much higher the place is than your eyes. 0 if unsure.</p>
+    </div>
     <input id="place" type="text" placeholder="e.g. Colosseum, Rome" autocomplete="off">
     <div class="row"><button id="search" class="btn primary">Search</button></div>
     <ul id="candidates" aria-label="Search results"></ul>
@@ -119,7 +127,7 @@
     <div class="row">
       <button id="change-target" class="btn">Change target</button>
       <button id="fullscreen" class="btn">Full screen</button>
-      <button id="calibrate" class="btn primary">Add calibration point</button>
+      <button id="calibrate" class="btn primary">Calibrate with landmarks</button>
     </div>
     <div id="cal-hint" class="hint"></div>
 
@@ -136,7 +144,10 @@
         <p>How much higher the target is than your eyes. Leave at 0 if unknown.</p>
       </div>
       <div id="cal-info" class="hint"></div>
-      <div class="row"><button id="reset-cal" class="btn">Reset calibration for this device</button></div>
+      <div class="row">
+        <button id="undo-cal" class="btn">Undo last landmark</button>
+        <button id="reset-cal" class="btn">Reset calibration for this device</button>
+      </div>
     </details>
   </section>
 
@@ -154,7 +165,7 @@
   <video id="cam" playsinline muted autoplay style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none"></video>
 </main>
 
-<script type="module" src="app.js?v=5"></script>
+<script type="module" src="app.js?v=6"></script>
 <script>
   // If the app script never starts (syntax error, old cached copy), say so instead of showing a dead page.
   setTimeout(function () {

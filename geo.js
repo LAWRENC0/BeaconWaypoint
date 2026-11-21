@@ -65,6 +65,13 @@ export function blendVector(prev, next, k) {
   return { east: e / len, north: n / len, up: u / len };
 }
 
+// Angle above horizon to a point at ground distance dist and height heightDiffM above the
+// observer, minus Earth curvature and refraction (full spec §6.2.2, k = 0.13).
+export function elevationDeg(distM, heightDiffM) {
+  const curvatureDeg = toDeg((distM / (2 * R)) * (1 - REFRACTION_K));
+  return toDeg(Math.atan2(heightDiffM, distM)) - curvatureDeg;
+}
+
 // Flat-plane projection of the target onto the photo.
 //   headingDeg : camera azimuth, true north = 0, clockwise positive
 //   pitchDeg   : camera tilt, 0 = horizon, positive = looking up
@@ -73,9 +80,7 @@ export function project({ user, target, heightDiffM, headingDeg, pitchDeg, fovHD
   const dist = distanceM(user.lat, user.lon, target.lat, target.lon);
   const bearing = bearingDeg(user.lat, user.lon, target.lat, target.lon);
   const dTheta = wrap180(bearing - headingDeg); // horizontal offset from image centre
-  // Angle above horizon to target, minus Earth curvature and refraction (full spec §6.2.2, k = 0.13).
-  const curvatureDeg = toDeg((dist / (2 * R)) * (1 - REFRACTION_K));
-  const elev = toDeg(Math.atan2(heightDiffM, dist)) - curvatureDeg;
+  const elev = elevationDeg(dist, heightDiffM);
   const dPhi = elev - pitchDeg; // vertical offset from image centre
 
   const fovV = fovVDeg(fovHDeg, width, height);
@@ -87,4 +92,63 @@ export function project({ user, target, heightDiffM, headingDeg, pitchDeg, fovHD
   const inFrame = x >= 0 && x <= width && y >= 0 && y <= height;
 
   return { dist, bearing, dTheta, elev, dPhi, x, y, inFrame };
+}
+
+// Calibration from landmarks the user can see and has tapped.
+// Each point: { uLat, uLon, tLat, tLon, hDiff, rawH, rawP, dx, dy, aspect }
+//   rawH/rawP : sensor aim at the tap (true heading, pitch) before any correction
+//   dx        : tapped x offset from image centre, as a fraction of image width  (+ = right)
+//   dy        : tapped y offset from image centre, as a fraction of image height (+ = up)
+//   aspect    : image height / width
+// Model: the true angle to the landmark is the screen angle, so
+//   dx * F = (bearing - rawH) - headingOffset      (horizontal, F = horizontal FOV)
+//   dy * fovV = elevation - (rawP + pitchOffset)   (vertical)
+// With 2+ points, F and headingOffset come from a least-squares line fit; with 1 point, F is
+// taken from fovFallbackDeg. pitchOffset is the mean of the vertical residuals.
+// Returns { fovH, headingOffset, pitchOffset, residualH, residualP, count } or { error }.
+export function fitCalibration(points, fovFallbackDeg) {
+  const n = points.length;
+  if (!n) return { error: "no points" };
+  const obs = points.map((q) => {
+    const dist = distanceM(q.uLat, q.uLon, q.tLat, q.tLon);
+    return {
+      D: wrap180(bearingDeg(q.uLat, q.uLon, q.tLat, q.tLon) - q.rawH),
+      E: elevationDeg(dist, q.hDiff),
+      rawP: q.rawP, dx: q.dx, dy: q.dy, aspect: q.aspect,
+    };
+  });
+
+  let fov, headingOffset;
+  if (n === 1) {
+    fov = fovFallbackDeg;
+    headingOffset = obs[0].D - fov * obs[0].dx;
+  } else {
+    // Solve dx_i = a * D_i - c with a = 1/F and c = a * headingOffset.
+    let sD = 0, sDD = 0, sx = 0, sDx = 0;
+    for (const o of obs) { sD += o.D; sDD += o.D * o.D; sx += o.dx; sDx += o.D * o.dx; }
+    const det = -n * sDD + sD * sD;
+    if (Math.abs(det) < 1e-6 * Math.max(n * sDD, 1)) return { error: "landmarks are all in the same direction" };
+    const a = (-n * sDx + sD * sx) / det;
+    const c = (sDD * sx - sD * sDx) / det;
+    if (!(a > 0)) return { error: "tapped spots do not fit a camera" };
+    fov = 1 / a;
+    headingOffset = c / a;
+  }
+  if (fov < 30 || fov > 110) return { error: `field of view ${fov.toFixed(0)}° is implausible` };
+
+  const fovVs = obs.map((o) => fovVDeg(fov, 1, o.aspect));
+  let pitchOffset = 0;
+  obs.forEach((o, i) => { pitchOffset += (o.E - o.rawP - o.dy * fovVs[i]) / n; });
+
+  let residualH = 0, residualP = 0;
+  obs.forEach((o, i) => {
+    residualH = Math.max(residualH, Math.abs((o.D - headingOffset) - fov * o.dx));
+    residualP = Math.max(residualP, Math.abs((o.E - o.rawP - pitchOffset) - o.dy * fovVs[i]));
+  });
+
+  // A large heading correction is normal for an uncalibrated phone (magnetic error), so only
+  // pitch, which is physically limited, is bounded.
+  headingOffset = wrap180(headingOffset);
+  if (Math.abs(pitchOffset) > 45) return { error: `pitch correction ${pitchOffset.toFixed(0)}° is too large` };
+  return { fovH: fov, headingOffset, pitchOffset, residualH, residualP, count: n };
 }
